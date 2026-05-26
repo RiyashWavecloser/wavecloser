@@ -1,0 +1,196 @@
+/**
+ * src/lib/dataLayer.js
+ *
+ * All frontend data operations go through here.
+ * Backend must be running (node server/claude-proxy.js) for live Airtable sync.
+ * Falls back gracefully — returns null on network errors so UI keeps React state.
+ *
+ * Public interface:
+ *   fetchUsersFromAPI()         → users[] | null
+ *   createUserAPI(user)         → { user } | { demo }
+ *   updateUserAPI(id, patch)    → { user } | { demo }
+ *   deleteUserAPI(id)           → { deleted } | { demo }
+ *   importUsersToAPI(users[])   → { imported, failed, demo }
+ *   fetchLogFromAPI()           → log[] | null
+ *   checkServerHealth()         → { status, claude, airtable, email }
+ */
+
+const PROXY = (import.meta.env.VITE_CLAUDE_PROXY_URL || 'http://localhost:3001/api/claude')
+  .replace('/api/claude', '');
+
+let _token = localStorage.getItem('wc_session_token') || null;
+
+export function setSession(token, user) {
+  _token = token;
+  if (token) {
+    localStorage.setItem('wc_session_token', token);
+    localStorage.setItem('wc_session_user', JSON.stringify(user));
+  } else {
+    localStorage.removeItem('wc_session_token');
+    localStorage.removeItem('wc_session_user');
+  }
+}
+
+export function getSession() {
+  const token = localStorage.getItem('wc_session_token');
+  const userStr = localStorage.getItem('wc_session_user');
+  try {
+    return {
+      token,
+      user: userStr ? JSON.parse(userStr) : null
+    };
+  } catch {
+    return { token: null, user: null };
+  }
+}
+
+function getHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (_token) {
+    headers['Authorization'] = `Bearer ${_token}`;
+  }
+  return headers;
+}
+
+// ─── HTTP helpers ─────────────────────────────────────────────────────────────
+
+async function get(path) {
+  const headers = {};
+  if (_token) headers['Authorization'] = `Bearer ${_token}`;
+  
+  const res = await fetch(`${PROXY}${path}`, { headers });
+  if (res.status === 401 || res.status === 403) {
+    setSession(null);
+    window.location.reload();
+  }
+  if (!res.ok) throw new Error(`GET ${path} → ${res.status}`);
+  return res.json();
+}
+
+async function post(path, body) {
+  const res = await fetch(`${PROXY}${path}`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401 || res.status === 403) {
+    setSession(null);
+    window.location.reload();
+  }
+  if (!res.ok) throw new Error(`POST ${path} → ${res.status}`);
+  return res.json();
+}
+
+async function patch(path, body) {
+  const res = await fetch(`${PROXY}${path}`, {
+    method: 'PATCH',
+    headers: getHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401 || res.status === 403) {
+    setSession(null);
+    window.location.reload();
+  }
+  if (!res.ok) throw new Error(`PATCH ${path} → ${res.status}`);
+  return res.json();
+}
+
+async function del(path) {
+  const headers = {};
+  if (_token) headers['Authorization'] = `Bearer ${_token}`;
+
+  const res = await fetch(`${PROXY}${path}`, { 
+    method: 'DELETE',
+    headers
+  });
+  if (res.status === 401 || res.status === 403) {
+    setSession(null);
+    window.location.reload();
+  }
+  if (!res.ok) throw new Error(`DELETE ${path} → ${res.status}`);
+  return res.json();
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────────
+
+/**
+ * Load all users from Airtable on app startup.
+ * Returns users[] if backend + Airtable are live, otherwise null (use seed data).
+ */
+export async function fetchUsersFromAPI() {
+  try {
+    const data = await get('/api/users');
+    if (data.demo || !data.users?.length) return null;
+    return data.users;
+  } catch {
+    return null; // backend offline — silent fallback to seed data
+  }
+}
+
+/**
+ * Create a new user in Airtable.
+ * Returns { demo: true } if backend is offline — caller keeps React state only.
+ */
+export async function createUserAPI(user) {
+  try {
+    return await post('/api/users', user);
+  } catch {
+    return { demo: true };
+  }
+}
+
+/**
+ * Update specific fields of a user in Airtable.
+ * patch = { stage: 3 } or { notes: '...' } or any subset of user fields.
+ */
+export async function updateUserAPI(id, patchData) {
+  try {
+    return await patch(`/api/users/${id}`, patchData);
+  } catch {
+    return { demo: true };
+  }
+}
+
+/**
+ * Delete a user from Airtable by Wave Closers ID (e.g. 'WC-1001').
+ */
+export async function deleteUserAPI(id) {
+  try {
+    return await del(`/api/users/${id}`);
+  } catch {
+    return { demo: true };
+  }
+}
+
+/**
+ * Push an array of users (from CSV) to Airtable via upsert.
+ */
+export async function importUsersToAPI(users) {
+  try {
+    return await post('/api/import', { users });
+  } catch (err) {
+    return { imported: 0, failed: users.length, demo: true, error: err.message };
+  }
+}
+
+// ─── Automation log ───────────────────────────────────────────────────────────
+
+export async function fetchLogFromAPI() {
+  try {
+    const data = await get('/api/log');
+    if (data.demo) return null;
+    return data.log || null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Health ───────────────────────────────────────────────────────────────────
+
+export async function checkServerHealth() {
+  try {
+    return await get('/health');
+  } catch {
+    return { status: 'offline', claude: false, airtable: false, email: false };
+  }
+}

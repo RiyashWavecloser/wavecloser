@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { USER_TYPES, ONBOARDING_STAGES } from '../data/constants.js';
 import { PageHeader, Card, CardHeader, Note } from '../components/ui.jsx';
 
-export default function OnboardingFlow({ users, setUsers }) {
-  const [draft, setDraft] = useState({ name: '', type: 'REFERRAL', market: '' });
+export default function OnboardingFlow({ users, setUsers, onCreateUser, onUpdateUser }) {
+  const [draft, setDraft] = useState({ name: '', type: 'REFERRAL', market: '', email: '' });
   const [routing, setRouting] = useState(null);
 
   function simulate() {
@@ -18,8 +18,14 @@ export default function OnboardingFlow({ users, setUsers }) {
       dealsThisMonth: 0,
       joined: new Date().toISOString().split('T')[0],
       market: draft.market || '—',
+      email: draft.email || '',
     };
-    setUsers([newUser, ...users]);
+    
+    if (onCreateUser) {
+      onCreateUser(newUser);
+    } else {
+      setUsers([newUser, ...users]);
+    }
 
     let stage = 1;
     setRouting({ user: newUser, stage });
@@ -27,12 +33,20 @@ export default function OnboardingFlow({ users, setUsers }) {
       stage += 1;
       if (stage > 6) {
         clearInterval(interval);
-        setUsers((prev) => prev.map((u) => (u.id === id ? { ...u, stage: 6 } : u)));
+        if (onUpdateUser) {
+          onUpdateUser(id, { stage: 6 });
+        } else {
+          setUsers((prev) => prev.map((u) => (u.id === id ? { ...u, stage: 6 } : u)));
+        }
         setTimeout(() => setRouting(null), 1200);
         return;
       }
       setRouting({ user: newUser, stage });
-      setUsers((prev) => prev.map((u) => (u.id === id ? { ...u, stage } : u)));
+      if (onUpdateUser) {
+        onUpdateUser(id, { stage });
+      } else {
+        setUsers((prev) => prev.map((u) => (u.id === id ? { ...u, stage } : u)));
+      }
     }, 900);
   }
 
@@ -65,6 +79,12 @@ export default function OnboardingFlow({ users, setUsers }) {
             placeholder="Market (city, state)"
             value={draft.market}
             onChange={(e) => setDraft({ ...draft, market: e.target.value })}
+            style={styles.input}
+          />
+          <input
+            placeholder="Email (optional)"
+            value={draft.email}
+            onChange={(e) => setDraft({ ...draft, email: e.target.value })}
             style={styles.input}
           />
           <button onClick={simulate} style={styles.primaryBtn}>Run flow →</button>
@@ -153,6 +173,45 @@ export default function OnboardingFlow({ users, setUsers }) {
           <Note>Online learning link and Thursday meeting time pending William&apos;s confirmation.</Note>
         </Card>
       </div>
+
+      {/* ── Live onboarding queue ── */}
+      <Card>
+        <CardHeader
+          title="Live onboarding queue"
+          sub={`${users.filter(u => u.stage < 4).length} users currently in stages 1-3`}
+        />
+        {users.filter(u => u.stage < 4).length === 0 ? (
+          <Note>All users have passed onboarding — none in stages 1-3.</Note>
+        ) : (
+          <table style={styles.table}>
+            <thead>
+              <tr>{['User','Type','Stage','Owner','Joined','Status'].map(h => <th key={h} style={styles.th}>{h}</th>)}</tr>
+            </thead>
+            <tbody>
+              {users.filter(u => u.stage < 4).map(u => {
+                const t = USER_TYPES[u.type] || USER_TYPES.REFERRAL;
+                const stage = ONBOARDING_STAGES[u.stage - 1];
+                const joinedDate = u.joined ? new Date(u.joined) : null;
+                const daysSince = joinedDate ? Math.floor((Date.now() - joinedDate.getTime()) / 86400000) : 0;
+                const stalled = daysSince >= 3;
+                return (
+                  <tr key={u.id} style={stalled ? { background:'var(--color-amber-bg)' } : {}}>
+                    <td style={styles.td}><strong>{u.name}</strong><div style={{ fontSize:11, color:'#888' }}>{u.id}</div></td>
+                    <td style={styles.td}><span style={{ fontSize:11, padding:'2px 8px', borderRadius:4, background:`${t.color}15`, color:t.color, fontWeight:600 }}>{t.short}</span></td>
+                    <td style={styles.td}>
+                      <div style={{ fontSize:13, fontWeight:600 }}>Step {u.stage} / 6</div>
+                      <div style={{ fontSize:11, color:'#888' }}>{stage?.label}</div>
+                    </td>
+                    <td style={styles.td}><span style={{ fontSize:12 }}>{stage?.owner}</span></td>
+                    <td style={styles.td}><span style={{ fontSize:12 }}>{u.joined || '—'}</span><div style={{ fontSize:11, color: stalled ? 'var(--color-amber)' : '#888' }}>{daysSince}d since joined</div></td>
+                    <td style={styles.td}>{stalled ? <span style={{ fontSize:11, fontWeight:600, color:'var(--color-amber-text)', background:'var(--color-amber-bg)', padding:'2px 8px', borderRadius:4 }}>⚠ Stalled</span> : <span style={{ fontSize:11, color:'var(--color-green)', fontWeight:600 }}>Active</span>}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
     </div>
   );
 }
@@ -160,7 +219,7 @@ export default function OnboardingFlow({ users, setUsers }) {
 const styles = {
   wrap: { display: 'flex', flexDirection: 'column', gap: 16 },
   twoCol: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 },
-  simRow: { display: 'grid', gridTemplateColumns: '2fr 2fr 2fr auto', gap: 12, marginTop: 4 },
+  simRow: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr auto', gap: 12, marginTop: 4 },
   input: {
     padding: '10px 12px',
     border: '1px solid #DDD3C2',
@@ -246,4 +305,7 @@ const styles = {
     fontWeight: 700,
     marginRight: 10,
   },
+  table: { width:'100%', borderCollapse:'collapse', fontSize:13 },
+  th:    { textAlign:'left', padding:'9px 10px', borderBottom:'1px solid var(--color-line)', fontSize:11, color:'#888', textTransform:'uppercase', letterSpacing:'0.06em', fontWeight:600 },
+  td:    { padding:'11px 10px', borderBottom:'1px solid var(--color-line-soft)', color:'#333', verticalAlign:'top' },
 };

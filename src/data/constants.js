@@ -85,3 +85,16 @@ export const STATUS_COLORS = {
   red:        { bg: 'var(--color-red-bg)',    text: 'var(--color-red-text)',    dot: 'var(--color-red)'   },
   onboarding: { bg: 'var(--color-info-bg)',   text: 'var(--color-info-text)',   dot: 'var(--color-info)'  },
 };
+
+/**
+ * Open items (scope §12) — update when William confirms each.
+ */
+export const OPEN_ITEMS = [
+  { id:1, item:'API availability from waveclosers.com',         blocks:'API sync mode',            status:'pending' },
+  { id:2, item:'Weekly lead targets per user type',            blocks:'Lead-shortfall alerts',    status:'pending' },
+  { id:3, item:'Monthly quota benchmarks per user type',       blocks:'Quota-miss escalations',   status:'pending' },
+  { id:4, item:'Contract template for CX automation',         blocks:'Contract dispatch email',   status:'pending' },
+  { id:5, item:'Online learning platform link / login flow',  blocks:'Online learning enrollment',status:'pending' },
+  { id:6, item:'Thursday sales training meeting time',        blocks:'Thursday training invite',  status:'pending' },
+  { id:7, item:'Sales Manager role (Janina or new hire?)',    blocks:'Step 6 ownership',          status:'pending' },
+];
