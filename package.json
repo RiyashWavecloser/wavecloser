@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Wave Closers — PM/Ops/AI internal operations console. Built per Project Scope v2.2.",
   "scripts": {
+    "start":       "node server/claude-proxy.js",
     "dev":         "vite",
     "build":       "vite build",
     "preview":     "vite preview",
