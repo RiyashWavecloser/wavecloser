@@ -85,3 +85,40 @@ textarea {
 ::-webkit-scrollbar-thumb:hover {
   background: #BBB;
 }
+
+/* Hamburger hidden on desktop */
+.wc-hamburger { display: none !important; }
+
+@media (max-width: 768px) {
+  .wc-hamburger {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+  }
+  .wc-sidebar {
+    position: fixed !important;
+    left: -260px;
+    top: 0;
+    bottom: 0;
+    transition: left 0.25s ease;
+    z-index: 45;
+    width: 240px !important;
+  }
+  .wc-sidebar-open { left: 0 !important; }
+  .wc-sidebar-close { display: inline-block !important; }
+  .wc-main { padding: 64px 16px 24px 16px !important; }
+
+  table { font-size: 12px !important; }
+  .wc-stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  .wc-two-col { grid-template-columns: 1fr !important; }
+
+  h1 { font-size: 22px !important; }
+  h2 { font-size: 18px !important; }
+
+  .wc-drawer { width: 100% !important; max-width: 420px; }
+  .wc-col-secondary { display: none !important; }
+
+  button { min-height: 36px; }
+  input, select, textarea { min-height: 36px; font-size: 16px; }
+}
+

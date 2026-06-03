@@ -21,8 +21,8 @@ const resend = process.env.RESEND_API_KEY
   ? new Resend(process.env.RESEND_API_KEY)
   : null;
 
-const FROM          = process.env.EMAIL_FROM            || 'ops@waveclosers.com';
-const RIYASH_EMAIL  = process.env.RIYASH_EMAIL          || 'riyash@waveclosers.com';
+const FROM          = process.env.EMAIL_FROM            || 'riyashpatel3@gmail.com';
+const RIYASH_EMAIL  = process.env.RIYASH_EMAIL          || 'riyashpatel3@gmail.com';
 const WILLIAM_EMAIL = process.env.WILLIAM_EMAIL         || 'william@waveclosers.com';
 
 // ─── Pending placeholder values ───────────────────────────────────────────────
@@ -61,9 +61,17 @@ export async function sendEmail({ to, subject, text }) {
     console.log(`  Body:\n${text.split('\n').map(l => '    ' + l).join('\n')}\n`);
     return { id: `demo-${Date.now()}` };
   }
+
+  // Resend sandbox validation: free accounts can only send to the registered owner (riyash@waveclosers.com)
+  let finalRecipients = recipients;
+  if (FROM === 'onboarding@resend.dev') {
+    finalRecipients = ['riyash@waveclosers.com'];
+    console.log(`[emailService] 🧪 Sandbox Redirect: Routing recipients [${recipients.join(', ')}] to verified owner [riyash@waveclosers.com]`);
+  }
+
   const { data, error } = await resend.emails.send({
     from: FROM,
-    to:   recipients,
+    to:   finalRecipients,
     subject,
     text,
   });
@@ -224,6 +232,21 @@ Wave Closers Customer Experience`;
   return { to: user.email, subject, text };
 }
 
+export function buildResetCodeEmail(email, code) {
+  const subject = `Wave Closers — Password Reset Code: ${code}`;
+  const text = `Hi,
+
+You requested a password reset for your Wave Closers Operations Console account.
+
+Your 6-digit verification code is: ${code}
+
+This code is valid for 15 minutes. If you did not request this reset, you can safely ignore this email.
+
+Wave Closers Security`;
+  return { to: email, subject, text };
+}
+
 export { RIYASH_EMAIL, WILLIAM_EMAIL, FROM };
 
 export function isConfigured() { return !!process.env.RESEND_API_KEY; }
+

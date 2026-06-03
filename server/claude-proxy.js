@@ -17,6 +17,8 @@
 import express from 'express';
 import cors    from 'cors';
 import dotenv  from 'dotenv';
+import fs      from 'fs';
+import crypto  from 'crypto';
 import {
   isConfigured as airtableReady,
   listUsers,
@@ -26,9 +28,11 @@ import {
   upsertUsers,
   listLog,
   getStaff,
+  updateStaffPassword,
+  isStaffEmpty,
 } from './airtableClient.js';
-import { isConfigured as emailReady } from './emailService.js';
-import { requireAuth, signToken, verifyPassword } from './auth.js';
+import { isConfigured as emailReady, sendEmail, buildResetCodeEmail } from './emailService.js';
+import { requireAuth, signToken, verifyPassword, hashPassword, requireRole } from './auth.js';
 
 dotenv.config();
 
@@ -36,6 +40,19 @@ const PORT           = process.env.PORT           || 3001;
 const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:4173')
   .split(',').map(s => s.trim());
+
+const JWT_SECRET_FILE = '.jwt-secret';
+function loadOrCreateJwtSecret() {
+  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+  if (fs.existsSync(JWT_SECRET_FILE)) {
+    return fs.readFileSync(JWT_SECRET_FILE, 'utf8').trim();
+  }
+  const secret = crypto.randomBytes(48).toString('hex');
+  fs.writeFileSync(JWT_SECRET_FILE, secret, { mode: 0o600 });
+  console.log('[proxy] 🔑 Generated new JWT_SECRET and saved to .jwt-secret');
+  return secret;
+}
+process.env.JWT_SECRET = loadOrCreateJwtSecret();
 
 // ─── Startup checks ───────────────────────────────────────────────────────────
 
@@ -53,6 +70,9 @@ if (!airtableReady()) {
 
 const app = express();
 
+// Enable trust proxy for correct IP detection behind Railway/Vercel
+app.set('trust proxy', 1);
+
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
@@ -66,70 +86,198 @@ app.use(express.json({ limit: '2mb' }));
 
 // ─── Authentication ───────────────────────────────────────────────────────────
 
-// Default fallback staff operators if Airtable has no credentials or table is missing
-const FALLBACK_OPERATORS = {
-  'riyash@waveclosers.com': {
-    name: 'Riyash',
-    role: 'Project Manager',
-    passwordHash: 'pbkdf2:7acc61b95f0db4c4ebe26640dd02594e:4019fefc87a0c5b9aec5be24af35d50ce5793d4841c51e2f7c6e5572cf27ae45b4e0f1e8c022482624213958f306d9fa92c3e64328b4d3c3e882563ba456ba86' // hash of 'password'
-  },
-  'william@waveclosers.com': {
-    name: 'William',
-    role: 'Executive Sponsor',
-    passwordHash: 'pbkdf2:32c66d21798369527ec50c7ca56adbe8:f86abf2be87cc5cb4cc913fa3be2efda16ff945b6369c0d7ad24bb59e51cb2a014902cae389d4fb97a14f52f36bc49e0c5d64811cf66ff8f8ca68c8577bb6ee3' // hash of 'password'
-  },
-  'mildred@waveclosers.com': {
-    name: 'Mildred',
-    role: 'Appointment Setter',
-    passwordHash: 'pbkdf2:32c66d21798369527ec50c7ca56adbe8:f86abf2be87cc5cb4cc913fa3be2efda16ff945b6369c0d7ad24bb59e51cb2a014902cae389d4fb97a14f52f36bc49e0c5d64811cf66ff8f8ca68c8577bb6ee3' // hash of 'password'
+const loginAttempts = new Map();
+function checkLoginLimit(ip) {
+  const now = Date.now();
+  const record = loginAttempts.get(ip);
+  if (!record || record.resetAt < now) {
+    loginAttempts.set(ip, { count: 1, resetAt: now + 15 * 60_000 });
+    return true;
   }
-};
+  record.count += 1;
+  return record.count <= 5;
+}
 
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
+  const ip = req.ip || 'unknown';
+  if (!checkLoginLimit(ip)) {
+    return res.status(429).json({ error: 'Too many login attempts. Try again in 15 minutes.' });
+  }
+
+  const { email, password } = req.body || {};
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password are required' });
   }
 
   const cleanEmail = email.toLowerCase().trim();
-  let operator = null;
 
-  if (airtableReady()) {
-    try {
-      operator = await getStaff(cleanEmail);
-    } catch (err) {
-      console.warn(`[auth] Airtable Staff lookup failed (may not exist yet): ${err.message}. Using fallback.`);
+  if (!airtableReady()) {
+    return res.status(503).json({ error: 'Airtable not configured. Run npm run seed:staff first.' });
+  }
+
+  try {
+    const isEmpty = await isStaffEmpty();
+    if (isEmpty) {
+      return res.status(503).json({ error: 'Staff table is empty. Run npm run seed:staff first.' });
     }
-  }
 
-  if (!operator) {
-    operator = FALLBACK_OPERATORS[cleanEmail];
-  }
+    const operator = await getStaff(cleanEmail);
+    if (!operator || !verifyPassword(password, operator.passwordHash)) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
 
-  if (!operator || !verifyPassword(password, operator.passwordHash)) {
-    return res.status(401).json({ error: 'Invalid email or password' });
-  }
-
-  const token = signToken({
-    email: operator.email || cleanEmail,
-    name: operator.name,
-    role: operator.role,
-  });
-
-  console.log(`[auth] Operator logged in: ${operator.name} (${operator.role})`);
-
-  res.json({
-    token,
-    user: {
-      email: operator.email || cleanEmail,
+    const token = signToken({
+      email: operator.email,
       name: operator.name,
       role: operator.role,
+    });
+
+    console.log(`[auth] Operator logged in: ${operator.name} (${operator.role})`);
+
+    res.json({
+      token,
+      user: {
+        email: operator.email,
+        name: operator.name,
+        role: operator.role,
+      },
+      mustChangePassword: operator.mustChangePassword,
+    });
+  } catch (err) {
+    console.error('[auth] Login error:', err.message);
+    res.status(503).json({ error: 'Database service unavailable. Run npm run seed:staff first.' });
+  }
+});
+
+// Password strength validator
+function validatePasswordStrength(password) {
+  if (typeof password !== 'string') return 'Password is required';
+  if (password.length < 10) return 'Password must be at least 10 characters';
+  if (!/[A-Za-z]/.test(password)) return 'Password must contain a letter';
+  if (!/[0-9]/.test(password)) return 'Password must contain a number';
+  const banned = ['password', 'changeme', '1234567890', 'qwerty123', 'letmein123'];
+  if (banned.some(b => password.toLowerCase().includes(b))) {
+    return 'Password is too common — pick something less obvious';
+  }
+  return null;
+}
+
+app.post('/api/auth/change-password', requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: 'currentPassword and newPassword are required' });
+  }
+  const strengthError = validatePasswordStrength(newPassword);
+  if (strengthError) return res.status(400).json({ error: strengthError });
+  if (currentPassword === newPassword) {
+    return res.status(400).json({ error: 'New password must be different from the current one' });
+  }
+  if (!airtableReady()) {
+    return res.status(503).json({ error: 'Airtable not configured' });
+  }
+  const email = req.user.email;
+  try {
+    const operator = await getStaff(email);
+    if (!operator || !verifyPassword(currentPassword, operator.passwordHash)) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
     }
-  });
+    const newHash = hashPassword(newPassword);
+    await updateStaffPassword(email, newHash);
+    console.log(`[auth] 🔑 ${operator.name} (${operator.role}) changed their password`);
+    res.json({ ok: true, mustChangePassword: false });
+  } catch (err) {
+    console.error('[auth] Change password error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const resetCodes = new Map();
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body || {};
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+  const cleanEmail = email.toLowerCase().trim();
+
+  if (!airtableReady()) {
+    return res.status(503).json({ error: 'Airtable not configured' });
+  }
+
+  try {
+    const operator = await getStaff(cleanEmail);
+    if (!operator) {
+      // Return 200 even if operator doesn't exist for security (prevent email enumeration)
+      // but only generate/send code if they exist
+      return res.json({ ok: true, message: 'If this email exists in our system, a reset code has been sent.' });
+    }
+
+    // Generate 6 digit numeric code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 15 * 60 * 1000; // 15 mins
+
+    resetCodes.set(cleanEmail, { code, expiresAt });
+
+    const emailTemplate = buildResetCodeEmail(cleanEmail, code);
+    await sendEmail({
+      to: emailTemplate.to,
+      subject: emailTemplate.subject,
+      text: emailTemplate.text
+    });
+
+    console.log(`[auth] 🔑 Password reset code sent to ${cleanEmail}: ${code}`);
+    res.json({ ok: true, message: 'If this email exists in our system, a reset code has been sent.' });
+  } catch (err) {
+    console.error('[auth] Forgot password error:', err.message);
+    res.status(500).json({ error: 'Failed to process password reset request' });
+  }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { email, code, newPassword } = req.body || {};
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ error: 'email, code, and newPassword are required' });
+  }
+  const cleanEmail = email.toLowerCase().trim();
+  const cleanCode = code.trim();
+
+  const record = resetCodes.get(cleanEmail);
+  if (!record) {
+    return res.status(400).json({ error: 'Invalid or expired reset code' });
+  }
+
+  if (record.code !== cleanCode || record.expiresAt < Date.now()) {
+    return res.status(400).json({ error: 'Invalid or expired reset code' });
+  }
+
+  const strengthError = validatePasswordStrength(newPassword);
+  if (strengthError) return res.status(400).json({ error: strengthError });
+
+  if (!airtableReady()) {
+    return res.status(503).json({ error: 'Airtable not configured' });
+  }
+
+  try {
+    const operator = await getStaff(cleanEmail);
+    if (!operator) {
+      return res.status(400).json({ error: 'Operator account not found' });
+    }
+
+    const newHash = hashPassword(newPassword);
+    await updateStaffPassword(cleanEmail, newHash);
+    resetCodes.delete(cleanEmail);
+
+    console.log(`[auth] 🔑 Password reset successful for ${operator.name} (${operator.role}) via code`);
+    res.json({ ok: true, message: 'Password has been reset successfully' });
+  } catch (err) {
+    console.error('[auth] Reset password error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Secure all subsequent /api/ routes
 app.use('/api', requireAuth);
+
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
@@ -190,7 +338,7 @@ app.get('/api/users', async (_req, res) => {
 });
 
 // Create a single user
-app.post('/api/users', async (req, res) => {
+app.post('/api/users', requireRole('admin', 'sponsor', 'appointment_setter'), async (req, res) => {
   const user = req.body;
   if (!user?.name) return res.status(400).json({ error: 'name is required' });
   if (!airtableReady()) {
@@ -208,7 +356,7 @@ app.post('/api/users', async (req, res) => {
 });
 
 // Update a single user (stage, notes, leads, etc.)
-app.patch('/api/users/:id', async (req, res) => {
+app.patch('/api/users/:id', requireRole('admin', 'sponsor', 'appointment_setter', 'recruiter'), async (req, res) => {
   const { id } = req.params;
   const patch   = req.body;
   if (!airtableReady()) {
@@ -226,7 +374,7 @@ app.patch('/api/users/:id', async (req, res) => {
 });
 
 // Delete a user
-app.delete('/api/users/:id', async (req, res) => {
+app.delete('/api/users/:id', requireRole('admin'), async (req, res) => {
   const { id } = req.params;
   if (!airtableReady()) {
     console.warn(`[proxy] DELETE /api/users/${id} → DEMO mode (not deleted from Airtable)`);
@@ -244,7 +392,7 @@ app.delete('/api/users/:id', async (req, res) => {
 
 // ─── Automation log ───────────────────────────────────────────────────────────
 
-app.get('/api/log', async (_req, res) => {
+app.get('/api/log', requireRole('admin', 'sponsor'), async (_req, res) => {
   if (!airtableReady()) {
     return res.json({ demo: true, log: [] });
   }
@@ -259,7 +407,7 @@ app.get('/api/log', async (_req, res) => {
 
 // ─── Import (CSV push to Airtable) ───────────────────────────────────────────
 
-app.post('/api/import', async (req, res) => {
+app.post('/api/import', requireRole('admin'), async (req, res) => {
   const users = req.body?.users;
   if (!Array.isArray(users) || !users.length) {
     return res.status(400).json({ error: 'Request body must be { users: [] }' });

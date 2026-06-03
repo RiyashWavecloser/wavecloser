@@ -130,7 +130,7 @@ export default function OnboardingFlow({ users, setUsers, onCreateUser, onUpdate
         )}
       </Card>
 
-      <div style={styles.twoCol}>
+      <div className="wc-two-col" style={styles.twoCol}>
         <Card>
           <CardHeader title="Routing by user type" />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

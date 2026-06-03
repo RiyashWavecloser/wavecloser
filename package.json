@@ -10,6 +10,7 @@
     "preview":     "vite preview",
     "lint":        "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0",
     "server":      "node server/claude-proxy.js",
+    "seed:staff":  "node scripts/seed-staff.mjs",
     "worker":      "node server/automationWorker.js",
     "worker:test": "node server/automationWorker.js --test-mode",
     "dev:all":     "concurrently --names \"vite,proxy,worker\" --prefix-colors \"cyan,yellow,magenta\" \"npm run dev\" \"npm run server\" \"npm run worker\""

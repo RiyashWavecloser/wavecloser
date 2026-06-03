@@ -61,7 +61,7 @@ export default function Dashboard({ users, onSelectUser }) {
       )}
 
       {/* ── Stat cards ── */}
-      <div style={styles.statGrid}>
+      <div className="wc-stat-grid" style={styles.statGrid}>
         <StatCard label="Total users"      value={stats.total}       sub="across 4 types" />
         <StatCard label="On track"         value={stats.onTrack}     sub="hitting benchmarks" tone="green" />
         <StatCard label="At risk"          value={stats.atRisk}      sub="below 70% quota"    tone="amber" />
@@ -71,7 +71,7 @@ export default function Dashboard({ users, onSelectUser }) {
       </div>
 
       {/* ── Charts ── */}
-      <div style={styles.twoCol}>
+      <div className="wc-two-col" style={styles.twoCol}>
         <Card>
           <CardHeader title="Lead & deal trend" sub="Last 6 weeks" />
           <div style={{ height: 220 }}>

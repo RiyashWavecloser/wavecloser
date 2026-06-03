@@ -186,10 +186,36 @@ export async function getStaff(email) {
     if (!recs.length) return null;
     const r = recs[0];
     return {
-      email: r.get('Email') || '',
-      passwordHash: r.get('PasswordHash') || '',
-      name: r.get('Name') || '',
-      role: r.get('Role') || '',
+      _airtableId:        r.id,
+      email:              r.get('Email')              || '',
+      passwordHash:       r.get('PasswordHash')       || '',
+      name:               r.get('Name')               || '',
+      role:               r.get('Role')               || '',
+      mustChangePassword: !!r.get('MustChangePassword'),
     };
   });
 }
+
+export async function updateStaffPassword(email, newPasswordHash) {
+  return retry(async () => {
+    const recs = await base()('Staff')
+      .select({ filterByFormula: `{Email} = "${email}"`, maxRecords: 1 })
+      .all();
+    if (!recs.length) throw new Error(`Staff record not found for ${email}`);
+    await base()('Staff').update(recs[0].id, {
+      PasswordHash:       newPasswordHash,
+      MustChangePassword: false,
+    });
+    return { email, updated: true };
+  });
+}
+
+export async function isStaffEmpty() {
+  return retry(async () => {
+    const recs = await base()('Staff')
+      .select({ maxRecords: 1 })
+      .all();
+    return recs.length === 0;
+  });
+}
+

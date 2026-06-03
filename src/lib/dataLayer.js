@@ -20,29 +20,38 @@ const PROXY = (import.meta.env.VITE_CLAUDE_PROXY_URL || 'http://localhost:3001/a
 
 let _token = localStorage.getItem('wc_session_token') || null;
 
-export function setSession(token, user) {
+export function setSession(token, user, mustChangePassword = false) {
   _token = token;
   if (token) {
     localStorage.setItem('wc_session_token', token);
     localStorage.setItem('wc_session_user', JSON.stringify(user));
+    localStorage.setItem('wc_session_must_change', mustChangePassword ? '1' : '0');
   } else {
     localStorage.removeItem('wc_session_token');
     localStorage.removeItem('wc_session_user');
+    localStorage.removeItem('wc_session_must_change');
   }
 }
 
 export function getSession() {
   const token = localStorage.getItem('wc_session_token');
   const userStr = localStorage.getItem('wc_session_user');
+  const mustChange = localStorage.getItem('wc_session_must_change') === '1';
   try {
     return {
       token,
-      user: userStr ? JSON.parse(userStr) : null
+      user: userStr ? JSON.parse(userStr) : null,
+      mustChangePassword: mustChange,
     };
   } catch {
-    return { token: null, user: null };
+    return { token: null, user: null, mustChangePassword: false };
   }
 }
+
+export function clearMustChangePassword() {
+  localStorage.setItem('wc_session_must_change', '0');
+}
+
 
 function getHeaders() {
   const headers = { 'Content-Type': 'application/json' };

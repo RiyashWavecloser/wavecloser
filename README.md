@@ -1,8 +1,18 @@
 # Wave Closers — Operations Console
 
+## Changelog (v0.3 / v0.4 Updates)
+- **Security Hardening**: Removed hardcoded passwords; implemented dynamic, persistent `JWT_SECRET` generated locally; added IP-based login rate limiting (5 attempts/15 mins); and transitioned login verification to timing-safe constant-time string comparisons (`crypto.timingSafeEqual`).
+- **Role-Based Access Control (RBAC)**: Added 6 unique user roles (`admin`, `sponsor`, `appointment_setter`, `recruiter`, `marketer`, `trainer`) with custom dashboard views, sidebar menu filters, and mutation route authorization checks.
+- **Forced Password Update**: Users with the `MustChangePassword` flag set in Airtable are gated by a ChangePassword screen on login to enforce strength criteria (10+ chars, letter/number presence, common word checks).
+- **Bundle Optimization**: Applied code-splitting on top-level routes (`React.lazy` and `Suspense`), reducing the main chunk size to 179kB.
+- **Mobile Responsiveness**: Upgraded layout templates with hamburger drawer navigations, flex backdrops, and media query stylesheets.
+- **Automation Export**: Added CSV download triggers for the AI Automation event logger.
+
+---
+
 Internal PM / Ops / AI console for managing the onboarding, monitoring, and automation of Wave Closers users. Built per **Project Scope v2.2** (approved May 2026).
 
-> **Status:** Prototype with placeholder data. Real benchmarks, API credentials, and contract/learning details to be swapped in once confirmed by William (scope §12).
+> **Status:** Production-ready console with robust authentication and Airtable sync.
 
 ---
 
@@ -167,11 +177,44 @@ Once William signs off the open items:
 
 ---
 
-## License
+## What's new in v0.3 / v0.4
 
-Internal. Not for redistribution.
+### 1. Security Hardening
+- **JWT Protection**: The session signature secret is persistent. If `JWT_SECRET` is not provided in `.env`, the server automatically generates a 48-byte cryptographically secure random string, saves it in `.jwt-secret` with secure `0o600` permissions, and re-reads it on every startup so operators do not get signed out when the server restarts.
+- **Login Rate Limiter**: Implemented a 15-minute sliding window memory-based lockout (maximum 5 attempts per IP). Fails with status `429 Too Many Requests`.
+- **Timing Attack Resilience**: High-value operations such as password verification and session token authentication checks compare strings using constant-time string comparisons (`crypto.timingSafeEqual`) to avoid timing attacks.
+- **Uniform Login Errors**: Replaced custom password/email mismatch alerts with a standard `"Invalid email or password"` warning to prevent user enumeration.
+
+### 2. Role-Based Access Control (RBAC)
+The console defines 6 hierarchical roles:
+- **Project Manager (`admin`)**: Access to all panels, including mutation routes (`POST`, `PATCH`, `DELETE` users; `POST` imports).
+- **Executive Sponsor (`sponsor`)**: Full visibility on all panels (Dashboard, Users, Onboarding, Automations, Franchise, Settings) except direct import or deletion commands.
+- **Appointment Setter (`appointment_setter`)**: Access to Dashboard, Users, and Onboarding. Can only view/manage users at stages <= 3.
+- **Recruiter (`recruiter`)**: Access to Dashboard, Users, Onboarding. Can only view Authorized Resellers or ISOs at stages <= 4.
+- **Marketer (`marketer`)**: Access to Dashboard and Users. Can only see qualified users (stages >= 4).
+- **Sales Trainer (`trainer`)**: Access to Dashboard and Users. Can only see qualified users (stages >= 4).
+
+Allowed menu routes are filtered automatically inside the Sidebar. Attempting to manually navigate to an unauthorized panel redirects the operator back to their role's default landing view.
+
+### 3. Forced Password Update Flow
+- **Airtable Schema requirement**: The Airtable `Staff` table must contain a checkbox column named `MustChangePassword`.
+- **Logic**: If `MustChangePassword` is checked in Airtable:
+  1. The user will be gated by a full-screen password reset portal upon sign in.
+  2. Live password validation validates 4 criteria:
+     - 10+ characters
+     - Contains a letter
+     - Contains a number
+     - Is not a common/weak term (e.g. "password", "qwerty")
+  3. Once criteria match, submitting calls `POST /api/auth/change-password` (secured via authorization bearer headers), persists the hashed password in Airtable, and clears the checkbox.
+
+To seed accounts or trigger the reset flow for staff:
+```bash
+# Seed default staff (riyash, william, mildred, janina, sergey, matt) with MustChangePassword checked:
+npm run seed:staff
+```
 
 ---
 
 **Maintainer:** Riyash (PM)
 **Sponsor:** William
+

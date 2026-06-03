@@ -90,7 +90,7 @@ export default function DataIntegration({ dataMode, setDataMode, users, setUsers
         ))}
       </div>
 
-      <div style={S.twoCol}>
+      <div className="wc-two-col" style={S.twoCol}>
         {/* ── CSV mode ── */}
         <Card style={{ borderTop:`3px solid ${dataMode==='csv'?'var(--color-amber)':'#DDD'}` }}>
           <CardHeader title="Mode 1 — CSV Upload" sub={dataMode==='csv' ? '● Active' : 'Standby'} />

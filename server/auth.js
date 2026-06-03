@@ -7,14 +7,27 @@
 
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import fs from 'fs';
 
 dotenv.config();
 
-// A secure persistent secret from env, fallback to auto-generated at startup
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
-if (!process.env.JWT_SECRET) {
-  console.warn('[auth] JWT_SECRET not configured. Sessions will expire if the server restarts.');
+const JWT_SECRET_FILE = '.jwt-secret';
+function loadOrCreateJwtSecret() {
+  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+  if (fs.existsSync(JWT_SECRET_FILE)) {
+    return fs.readFileSync(JWT_SECRET_FILE, 'utf8').trim();
+  }
+  const secret = crypto.randomBytes(48).toString('hex');
+  try {
+    fs.writeFileSync(JWT_SECRET_FILE, secret, { mode: 0o600 });
+    console.log('[auth] 🔑 Generated new JWT_SECRET and saved to .jwt-secret');
+  } catch (err) {
+    console.warn('[auth] Could not write .jwt-secret file:', err.message);
+  }
+  return secret;
 }
+process.env.JWT_SECRET = loadOrCreateJwtSecret();
+const JWT_SECRET = process.env.JWT_SECRET;
 
 /**
  * Hash a password using PBKDF2
@@ -33,10 +46,12 @@ export function verifyPassword(password, storedHash) {
   if (!storedHash) return false;
   const parts = storedHash.split(':');
   if (parts.length !== 3 || parts[0] !== 'pbkdf2') return false;
-  const salt = parts[1];
-  const hash = parts[2];
-  const verifyHash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
-  return verifyHash === hash;
+  const [, salt, hash] = parts;
+  const candidate = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+  const a = Buffer.from(candidate, 'hex');
+  const b = Buffer.from(hash, 'hex');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 /**
@@ -59,7 +74,11 @@ export function verifyToken(token) {
   if (parts.length !== 2) return null;
   const [base64Body, signature] = parts;
   const expectedSig = crypto.createHmac('sha256', JWT_SECRET).update(base64Body).digest('base64url');
-  if (signature !== expectedSig) return null;
+  
+  const a = Buffer.from(signature, 'utf8');
+  const b = Buffer.from(expectedSig, 'utf8');
+  if (a.length !== b.length) return null;
+  if (!crypto.timingSafeEqual(a, b)) return null;
   
   try {
     const bodyStr = Buffer.from(base64Body, 'base64url').toString('utf8');
@@ -91,3 +110,19 @@ export function requireAuth(req, res, next) {
   req.user = payload;
   next();
 }
+
+/**
+ * Require specific roles middleware
+ */
+export function requireRole(...allowed) {
+  return function (req, res, next) {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    if (!allowed.includes(req.user.role)) {
+      return res.status(403).json({
+        error: `This action requires one of: ${allowed.join(', ')}. Your role: ${req.user.role}`,
+      });
+    }
+    next();
+  };
+}
+

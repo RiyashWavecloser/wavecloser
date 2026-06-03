@@ -51,6 +51,23 @@ export default function AutomationPanel({ users: _users }) {
     setRunning(null);
   }
 
+  function exportLogCSV() {
+    const rows = [
+      ['Time', 'Task', 'Target', 'Status'],
+      ...log.map(e => [e.time, e.task, e.target, e.status]),
+    ];
+    const csv = rows.map(r => r.map(cell => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `wave-closers-automation-log-${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   async function generateEmail(type) {
     setGenLoad(true); setPreview(null);
     const labels  = { REFERRAL:'Referral Partner', REP:'Independent Rep', RESELLER:'Authorized Reseller', ISO:'ISO Investor (Done For You)' };
@@ -85,7 +102,7 @@ export default function AutomationPanel({ users: _users }) {
         ))}
       </div>
 
-      <div style={S.twoCol}>
+      <div className="wc-two-col" style={S.twoCol}>
         {/* ── Task list ── */}
         <Card>
           <CardHeader title="Automation tasks" sub={`${active} of ${AUTOMATION_TASKS.length} live`} />
@@ -118,7 +135,7 @@ export default function AutomationPanel({ users: _users }) {
           <Card>
             <CardHeader
               title="Live activity log"
-              sub={<span>Latest 20 events <button onClick={refreshLog} style={S.refreshBtn} title="Refresh">↺</button></span>}
+              sub={<span>Latest 20 events <button onClick={refreshLog} style={S.refreshBtn} title="Refresh">↺</button><button onClick={exportLogCSV} style={S.refreshBtn} title="Export CSV">↓</button></span>}
             />
             {log.slice(0, 20).map((entry, i) => (
               <div key={i} style={S.logRow}>
