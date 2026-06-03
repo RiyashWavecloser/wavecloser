@@ -19,6 +19,7 @@ import cors    from 'cors';
 import dotenv  from 'dotenv';
 import fs      from 'fs';
 import crypto  from 'crypto';
+import { spawn } from 'child_process';
 import {
   isConfigured as airtableReady,
   listUsers,
@@ -432,6 +433,15 @@ app.listen(PORT, () => {
   console.log(`  Airtable: ${airtableReady()  ? '✓ connected'      : '✗ not configured'}`);
   console.log(`  Email:    ${emailReady()      ? '✓ Resend ready'   : '✗ demo mode (console)'}`);
   console.log();
+
+  // Spawns the automation worker process alongside the Express server in cloud deployments
+  if (process.env.START_WORKER === 'true') {
+    console.log('[proxy] ⚙️ Spawning automation worker in background...');
+    const worker = spawn('node', ['server/automationWorker.js'], { stdio: 'inherit' });
+    worker.on('close', (code) => {
+      console.log(`[proxy] ⚙️ Automation worker exited with code ${code}`);
+    });
+  }
 });
 
 // ─── Helpers (used by emailService import check) ──────────────────────────────
