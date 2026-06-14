@@ -64,9 +64,11 @@ export default function Settings({ dataMode, setDataMode }) {
         </button>
         {health && (
           <div style={s.healthGrid}>
-            <HealthRow label="Claude AI"    ok={health.claude}    yes="✓ Ready" no="✗ No API key — Claude features disabled" />
-            <HealthRow label="Airtable DB"  ok={health.airtable}  yes="✓ Connected" no="✗ Not configured — using seed data" />
-            <HealthRow label="Email (Resend)" ok={health.email}   yes="✓ Ready" no="✗ No key — emails log to console" />
+            <HealthRow label="Claude AI"      ok={health.claude}       yes="✓ Ready" no="✗ No API key — Claude features disabled" />
+            <HealthRow label="Airtable DB"    ok={health.airtable}     yes="✓ Connected" no="✗ Not configured — using seed data" />
+            <HealthRow label="Email (Resend)" ok={health.email}        yes="✓ Ready" no="✗ No key — emails log to console" />
+            <HealthRow label="Google Places"  ok={health.googlePlaces} yes="✓ Key set" no="✗ No key — lead gen uses demo data" />
+            <HealthRow label="Yelp Fusion"    ok={health.yelp}         yes="✓ Key set" no="✗ No key — Yelp backup disabled" />
             <div style={s.healthTs}>
               {health.status === 'offline' ? 'Server is offline. Run: node server/claude-proxy.js' : `Checked at ${new Date().toLocaleTimeString()}`}
             </div>
@@ -78,7 +80,7 @@ export default function Settings({ dataMode, setDataMode }) {
       <Card>
         <CardHeader
           title="Open items (scope §12)"
-          sub="7 items pending from William — fill in, then activate"
+          sub="10 items pending from William — fill in, then activate"
         />
         <table style={s.table}>
           <thead>
@@ -204,6 +206,13 @@ const ENV_VARS = [
   { key:'LEARNING_PLATFORM_URL', desc:'Online learning platform URL (Pending #5)',           where:'Confirm with William' },
   { key:'THURSDAY_TRAINING_TIME',desc:'Meeting time string, e.g. "Thursdays 2pm ET" (#6)',  where:'Confirm with William' },
   { key:'THURSDAY_TRAINING_LINK',desc:'Zoom/calendar link for training (#6)',               where:'Confirm with William' },
+  { key:'GOOGLE_PLACES_API_KEY', desc:'Google Places API key — powers live lead generation',  where:'console.cloud.google.com → Places API' },
+  { key:'YELP_API_KEY',          desc:'Yelp Fusion API key — backup lead source',            where:'fusion.yelp.com → Create App' },
+  { key:'DAILY_LEADS_PER_AGENT', desc:'Target leads per agent per day (default: 100)',        where:'Adjust as needed' },
+  { key:'NUM_AGENTS',            desc:'Number of cold-calling agents (default: 10)',          where:'Update when team changes' },
+  { key:'QUALIFIER_EMAIL',       desc:"Qualifier's notification email address",              where:'Set in .env' },
+  { key:'RECRUITER_EMAIL',       desc:"Recruiter's routing email address",                    where:'Set in .env' },
+  { key:'AGENT_PASSWORD',        desc:'Default password for cold-calling agent accounts',     where:'Set in .env' },
 ];
 
 // ─── Styles ───────────────────────────────────────────────────────────────────

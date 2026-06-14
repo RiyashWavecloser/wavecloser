@@ -122,3 +122,13 @@ textarea {
   input, select, textarea { min-height: 36px; font-size: 16px; }
 }
 
+/* Lead generation progress animation */
+@keyframes wc-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.wc-generating {
+  animation: wc-pulse 1.5s ease-in-out infinite;
+}
+

@@ -121,7 +121,7 @@ export default function Users({ users, setUsers, onCreateUser, onUpdateUser, onD
             <button onClick={addUser} style={S.primaryBtn}>Add user →</button>
             <button onClick={() => setAddOpen(false)} style={S.outBtn}>Cancel</button>
           </div>
-          <Note>Adding sets Stage 1. Routing applied automatically per user type (Referral/Rep → Mildred CX; Reseller/ISO → Janina Recruiter).</Note>
+          <Note>Adding sets Stage 1. Routing applied automatically per user type (Referral/Rep → CX Team; Reseller/ISO → Recruiter).</Note>
         </Card>
       )}
 
@@ -271,7 +271,7 @@ export default function Users({ users, setUsers, onCreateUser, onUpdateUser, onD
               </div>
               <div style={{ marginTop:12 }}>
                 <div style={{ fontSize:11, color:'#888', textTransform:'uppercase', letterSpacing:'0.06em' }}>Routing Path</div>
-                <div style={{ fontSize:12, fontWeight:500, marginTop:3, color: 'var(--color-primary)' }}>{t.route === 'CX' ? '→ Mildred (CX)' : '→ Janina → Mildred (CX)'}</div>
+                <div style={{ fontSize:12, fontWeight:500, marginTop:3, color: 'var(--color-primary)' }}>{t.route === 'CX' ? '→ CX Team' : '→ Recruiter → CX Team'}</div>
               </div>
 
               {/* ── Notes ── */}

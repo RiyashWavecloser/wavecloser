@@ -200,6 +200,181 @@ export async function checkServerHealth() {
   try {
     return await get('/health');
   } catch {
-    return { status: 'offline', claude: false, airtable: false, email: false };
+    return { status: 'offline', claude: false, airtable: false, email: false, googlePlaces: false, yelp: false };
   }
 }
+
+// ─── Leads (Module 6) ─────────────────────────────────────────────────────────
+
+const LEADS_STORAGE_KEY = 'wc_leads_data';
+
+/**
+ * Load leads from localStorage (demo mode persistence).
+ * Call outcomes survive page refresh.
+ */
+export function loadLeadsFromStorage() {
+  try {
+    const raw = localStorage.getItem(LEADS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save leads to localStorage for demo mode persistence.
+ */
+export function saveLeadsToStorage(leads) {
+  try {
+    localStorage.setItem(LEADS_STORAGE_KEY, JSON.stringify(leads));
+  } catch {
+    // Storage quota exceeded — silently ignore
+  }
+}
+
+/**
+ * Fetch leads from API. Falls back to localStorage if backend offline.
+ */
+export async function fetchLeadsFromAPI(filters = {}) {
+  try {
+    const params = new URLSearchParams();
+    if (filters.status) params.set('status', filters.status);
+    if (filters.type)   params.set('type', filters.type);
+    if (filters.market) params.set('market', filters.market);
+    if (filters.agent)  params.set('agent', filters.agent);
+    const qs = params.toString();
+    const data = await get(`/api/leads${qs ? '?' + qs : ''}`);
+    if (data.demo || !data.leads?.length) return null;
+    return data.leads;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Trigger lead generation. Returns { leads, stats, demo }.
+ */
+export async function generateLeadsAPI(location, businessTypes, radius) {
+  try {
+    return await post('/api/leads/generate', { location, businessTypes, radius });
+  } catch {
+    return { leads: [], stats: {}, demo: true, error: 'Backend offline' };
+  }
+}
+
+/**
+ * Assign a batch of leads to an agent.
+ */
+export async function assignLeadsAPI(leadIds, agent) {
+  try {
+    return await post('/api/leads/assign', { leadIds, agent });
+  } catch {
+    return { demo: true, assigned: leadIds.length };
+  }
+}
+
+/**
+ * Update a lead's status/outcome.
+ */
+export async function updateLeadAPI(placeId, patchData) {
+  try {
+    return await patch(`/api/leads/${encodeURIComponent(placeId)}`, patchData);
+  } catch {
+    return { demo: true };
+  }
+}
+
+/**
+ * Fetch lead stats for analytics.
+ */
+export async function fetchLeadStatsAPI() {
+  try {
+    const data = await get('/api/leads/stats');
+    if (data.demo) return null;
+    return data.stats;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Agent Portal ─────────────────────────────────────────────────────────────
+
+/**
+ * Fetch leads assigned to the current logged-in agent (uses auth token).
+ * Agent Portal polls this every 15 seconds.
+ */
+export async function fetchMyLeadsAPI() {
+  try {
+    const data = await get('/api/leads/my-leads');
+    if (data.demo) return null;
+    return data.leads;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Partner Assignment ───────────────────────────────────────────────────────
+
+/**
+ * Assign a lead to a Wave Closers partner.
+ * Increments partner's leadsThisWeek in Users table.
+ */
+export async function assignLeadToPartnerAPI(placeId, partnerWCId) {
+  try {
+    return await post(`/api/leads/${encodeURIComponent(placeId)}/assign-partner`, { partnerWCId });
+  } catch {
+    return { demo: true };
+  }
+}
+
+// ─── Lead Qualification Queue ──────────────────────────────────────────────────
+
+/**
+ * Fetch Qualifier's queue of interested leads.
+ */
+export async function fetchQualifierQueueAPI() {
+  try {
+    const data = await get('/api/qualifier/queue');
+    if (data.demo) return null;
+    return data.leads;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch Qualifier's completed leads.
+ */
+export async function fetchQualifierCompletedAPI() {
+  try {
+    const data = await get('/api/qualifier/completed');
+    if (data.demo) return null;
+    return data.entries;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Update Qualifier's status for a lead.
+ */
+export async function updateQualifierStatusAPI(placeId, qualifierStatus, qualifierNotes) {
+  try {
+    return await patch(`/api/qualifier/queue/${encodeURIComponent(placeId)}`, { qualifierStatus, qualifierNotes });
+  } catch {
+    return { demo: true };
+  }
+}
+
+/**
+ * Qualify a lead — sets user type + routes to CX or Recruiter.
+ */
+export async function qualifyLeadAPI(placeId, userType, notes) {
+  try {
+    return await post(`/api/qualifier/queue/${encodeURIComponent(placeId)}/qualify`, { userType, notes });
+  } catch {
+    return { demo: true };
+  }
+}
+
+

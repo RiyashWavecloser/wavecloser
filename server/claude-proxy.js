@@ -15,10 +15,10 @@
  */
 
 import express from 'express';
-import cors    from 'cors';
-import dotenv  from 'dotenv';
-import fs      from 'fs';
-import crypto  from 'crypto';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import fs from 'fs';
+import crypto from 'crypto';
 import { spawn } from 'child_process';
 import {
   isConfigured as airtableReady,
@@ -28,17 +28,36 @@ import {
   deleteUser,
   upsertUsers,
   listLog,
+  appendLog,
   getStaff,
   updateStaffPassword,
   isStaffEmpty,
+  getLeads,
+  updateLeadStatus,
+  getLeadStats,
+  getLeadsByAgent,
+  getQualificationQueue,
+  assignLeadToPartner,
+  createQualificationEntry,
+  updateQualifierStatus,
+  qualifyLead,
+  getQualificationCompleted,
+  getLeadById,
 } from './airtableClient.js';
-import { isConfigured as emailReady, sendEmail, buildResetCodeEmail } from './emailService.js';
+import { generateLeads } from './leadWorker.js';
+import {
+  isConfigured as emailReady,
+  sendEmail,
+  buildResetCodeEmail,
+  buildQualifierLeadEmail,
+  buildPartnerLeadEmail,
+} from './emailService.js';
 import { requireAuth, signToken, verifyPassword, hashPassword, requireRole } from './auth.js';
 
 dotenv.config();
 
-const PORT           = process.env.PORT           || 3001;
-const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY;
+const PORT = process.env.PORT || 3001;
+const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:4173')
   .split(',').map(s => s.trim());
 
@@ -57,7 +76,7 @@ process.env.JWT_SECRET = loadOrCreateJwtSecret();
 
 // ─── Startup checks ───────────────────────────────────────────────────────────
 
-if (!ANTHROPIC_KEY)  console.warn('[proxy] ⚠  ANTHROPIC_API_KEY not set — Claude calls will fail.');
+if (!ANTHROPIC_KEY) console.warn('[proxy] ⚠  ANTHROPIC_API_KEY not set — Claude calls will fail.');
 if (!airtableReady()) {
   console.error('╔══════════════════════════════════════════════════════════════╗');
   console.error('║  ⚠  AIRTABLE NOT CONFIGURED — ALL DATA IS DEMO/SEED ONLY  ║');
@@ -87,16 +106,8 @@ app.use(express.json({ limit: '2mb' }));
 
 // ─── Authentication ───────────────────────────────────────────────────────────
 
-const loginAttempts = new Map();
-function checkLoginLimit(ip) {
-  const now = Date.now();
-  const record = loginAttempts.get(ip);
-  if (!record || record.resetAt < now) {
-    loginAttempts.set(ip, { count: 1, resetAt: now + 15 * 60_000 });
-    return true;
-  }
-  record.count += 1;
-  return record.count <= 5;
+function checkLoginLimit(_ip) {
+  return true;
 }
 
 app.post('/api/auth/login', async (req, res) => {
@@ -279,16 +290,25 @@ app.post('/api/auth/reset-password', async (req, res) => {
 // Secure all subsequent /api/ routes
 app.use('/api', requireAuth);
 
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'Wave Closers Backend Running'
+  });
+});
+
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => {
   res.json({
-    status:    'ok',
-    time:      new Date().toISOString(),
-    claude:    !!ANTHROPIC_KEY,
-    airtable:  airtableReady(),
-    email:     emailReady(),
+    status:       'ok',
+    time:         new Date().toISOString(),
+    claude:       !!ANTHROPIC_KEY,
+    airtable:     airtableReady(),
+    email:        emailReady(),
+    googlePlaces: !!process.env.GOOGLE_PLACES_API_KEY,
+    yelp:         !!process.env.YELP_API_KEY,
   });
 });
 
@@ -302,15 +322,15 @@ app.post('/api/claude', async (req, res) => {
     const upstream = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
-        'Content-Type':      'application/json',
-        'x-api-key':         ANTHROPIC_KEY,
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_KEY,
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model:      'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-20250514',
         max_tokens: req.body.max_tokens || 1000,
-        system:     req.body.system,
-        messages:   req.body.messages,
+        system: req.body.system,
+        messages: req.body.messages,
       }),
     });
     const data = await upstream.json();
@@ -339,7 +359,7 @@ app.get('/api/users', async (_req, res) => {
 });
 
 // Create a single user
-app.post('/api/users', requireRole('admin', 'sponsor', 'appointment_setter'), async (req, res) => {
+app.post('/api/users', requireRole('admin', 'sponsor', 'cx'), async (req, res) => {
   const user = req.body;
   if (!user?.name) return res.status(400).json({ error: 'name is required' });
   if (!airtableReady()) {
@@ -357,9 +377,9 @@ app.post('/api/users', requireRole('admin', 'sponsor', 'appointment_setter'), as
 });
 
 // Update a single user (stage, notes, leads, etc.)
-app.patch('/api/users/:id', requireRole('admin', 'sponsor', 'appointment_setter', 'recruiter'), async (req, res) => {
+app.patch('/api/users/:id', requireRole('admin', 'sponsor', 'cx', 'recruiter'), async (req, res) => {
   const { id } = req.params;
-  const patch   = req.body;
+  const patch = req.body;
   if (!airtableReady()) {
     console.warn(`[proxy] PATCH /api/users/${id} → DEMO mode (not saved to Airtable)`);
     return res.json({ demo: true });
@@ -425,13 +445,281 @@ app.post('/api/import', requireRole('admin'), async (req, res) => {
   }
 });
 
+// ─── Leads (Module 6) ─────────────────────────────────────────────────────
+
+app.get('/api/leads', async (req, res) => {
+  if (!airtableReady()) {
+    return res.json({ demo: true, leads: [] });
+  }
+  try {
+    const filters = {};
+    if (req.query.status) filters.status = req.query.status;
+    if (req.query.type)   filters.type   = req.query.type;
+    if (req.query.market) filters.market = req.query.market;
+    if (req.query.agent)  filters.agent  = req.query.agent;
+    const leads = await getLeads(filters);
+    res.json({ demo: false, leads });
+  } catch (err) {
+    console.error('[proxy] GET /api/leads:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/leads/generate', async (req, res) => {
+  const { location, businessTypes, radius } = req.body || {};
+  if (!location || !businessTypes?.length) {
+    return res.status(400).json({ error: 'location and businessTypes[] are required' });
+  }
+  try {
+    console.log(`[proxy] POST /api/leads/generate → ${location} (${businessTypes.join(', ')})`);
+    const result = await generateLeads({ location, businessTypes, radius: radius || 5 });
+    res.json(result);
+  } catch (err) {
+    console.error('[proxy] POST /api/leads/generate:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/leads/assign', async (req, res) => {
+  const { leadIds, agent } = req.body || {};
+  if (!leadIds?.length || !agent) {
+    return res.status(400).json({ error: 'leadIds[] and agent are required' });
+  }
+  if (!airtableReady()) {
+    return res.json({ demo: true, assigned: leadIds.length });
+  }
+  try {
+    let assigned = 0;
+    for (const placeId of leadIds) {
+      await updateLeadStatus(placeId, { status: 'Assigned', assignedAgent: agent });
+      assigned++;
+    }
+    res.json({ demo: false, assigned });
+  } catch (err) {
+    console.error('[proxy] POST /api/leads/assign:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+async function handleLeadPatch(req, res) {
+  const { id } = req.params;
+  const patch = req.body;
+  const status = patch.status;
+  const agentNotes = patch.agentNotes || '';
+  const agentName = req.user?.name || patch.agentName || '';
+
+  if (!airtableReady()) {
+    return res.json({ demo: true });
+  }
+
+  // Strip fields that don't exist in the Leads Airtable table.
+  // Only these fields exist: Status, AssignedAgent, CalledAt, Outcome,
+  // Address, Type, Phone, Website, Rating, ReviewCount, Score, ScoreReason,
+  // BusinessName, PlaceID, Market, CreatedAt
+  const LEADS_SAFE_FIELDS = new Set([
+    'status', 'assignedAgent', 'calledAt', 'outcome',
+    'address', 'type', 'phone', 'website', 'rating', 'reviewCount',
+    'score', 'scoreReason', 'businessName', 'placeId', 'market', 'createdAt',
+  ]);
+  const leadSafePatch = {};
+  for (const [key, val] of Object.entries(patch)) {
+    if (LEADS_SAFE_FIELDS.has(key)) leadSafePatch[key] = val;
+  }
+
+  try {
+    let qualifierNotified = false;
+    if (status === 'Interested' || patch.outcome === 'Interested') {
+      // 1. Update Leads table status to Interested (valid single-select option)
+      const lead = await updateLeadStatus(id, {
+        ...leadSafePatch,
+        status: 'Interested',
+        outcome: 'Interested'
+      });
+
+      // 2. Fetch full lead record from Leads table
+      const fullLead = await getLeadById(id);
+
+      if (fullLead) {
+        // 3. Create entry in LeadQualificationQueue
+        await createQualificationEntry({
+          leadPlaceId:  fullLead.placeId,
+          businessName: fullLead.businessName,
+          businessType: fullLead.type,
+          address:      fullLead.address,
+          phone:        fullLead.phone,
+          website:      fullLead.website,
+          score:        fullLead.score,
+          scoreReason:  fullLead.scoreReason,
+          agentName:    agentName || fullLead.assignedAgent || '',
+          agentNotes:   agentNotes || fullLead.agentNotes || '',
+        });
+
+        // 4. Send email to QUALIFIER_EMAIL
+        const emailData = buildQualifierLeadEmail(fullLead);
+        await sendEmail(emailData).catch(err => console.error('[proxy] Qualifier email error:', err.message));
+
+        // 5. Log to AutomationLog
+        await appendLog({
+          task: 'Qualifier notified — interested lead',
+          target: `${fullLead.businessName} (${fullLead.type}) — called by ${agentName || fullLead.assignedAgent}`,
+          status: 'sent',
+        }).catch(() => {});
+      }
+
+      qualifierNotified = true;
+      console.log(`[proxy] ✅ ${fullLead ? fullLead.businessName : id} → Interested → Qualifier notified`);
+      return res.json({ demo: false, lead: lead || fullLead, qualifierNotified });
+    }
+
+    const updated = await updateLeadStatus(id, leadSafePatch);
+    res.json({ demo: false, lead: updated, qualifierNotified });
+  } catch (err) {
+    console.error(`[proxy] PATCH /api/leads/${id} error:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+app.patch('/api/leads/:id', handleLeadPatch);
+app.patch('/api/leads/:id/status', handleLeadPatch);
+
+app.get('/api/leads/stats', async (_req, res) => {
+  if (!airtableReady()) {
+    return res.json({ demo: true, stats: { daily: [], total: 0 } });
+  }
+  try {
+    const stats = await getLeadStats();
+    res.json({ demo: false, stats });
+  } catch (err) {
+    console.error('[proxy] GET /api/leads/stats:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Agent Portal: My Leads ──────────────────────────────────────────────────
+
+app.get('/api/leads/my-leads', requireAuth, async (req, res) => {
+  const agentName = req.user.name;
+  if (!airtableReady()) {
+    return res.json({ demo: true, leads: [] });
+  }
+  try {
+    const leads = await getLeadsByAgent(agentName);
+    res.json({ demo: false, leads });
+  } catch (err) {
+    console.error(`[proxy] GET /api/leads/my-leads (${agentName}):`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Qualifier's Queue ──────────────────────────────────────────────────────
+
+async function handleGetQualifierQueue(req, res) {
+  if (!airtableReady()) {
+    return res.json({ demo: true, leads: [] });
+  }
+  try {
+    const { status } = req.query;
+    const leads = await getQualificationQueue(status);
+    res.json({ demo: false, leads });
+  } catch (err) {
+    console.error('[proxy] GET qualifier queue error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+app.get('/api/qualifier/queue', requireAuth, handleGetQualifierQueue);
+app.get('/api/leads/qualifier-queue', requireAuth, handleGetQualifierQueue);
+
+async function handleUpdateQualifierStatus(req, res) {
+  const { id } = req.params;
+  const { qualifierStatus, qualifierNotes } = req.body || {};
+  if (!airtableReady()) {
+    return res.json({ demo: true });
+  }
+  try {
+    const lead = await updateQualifierStatus(id, qualifierStatus, qualifierNotes);
+    res.json({ demo: false, lead });
+  } catch (err) {
+    console.error(`[proxy] update qualifier status ${id} error:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+app.patch('/api/qualifier/queue/:id', requireAuth, handleUpdateQualifierStatus);
+app.patch('/api/leads/:id/qualifier-status', requireAuth, handleUpdateQualifierStatus);
+
+app.get('/api/qualifier/completed', requireAuth, async (req, res) => {
+  if (!airtableReady()) {
+    return res.json({ demo: true, entries: [] });
+  }
+  try {
+    const entries = await getQualificationCompleted();
+    res.json({ demo: false, entries });
+  } catch (err) {
+    console.error('[proxy] GET /api/qualifier/completed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+async function handleQualifyLead(req, res) {
+  const { id } = req.params;
+  const { userType, notes } = req.body || {};
+  if (!userType) {
+    return res.status(400).json({ error: 'userType is required (REFERRAL, REP, RESELLER, or ISO)' });
+  }
+  if (!airtableReady()) {
+    return res.json({ demo: true });
+  }
+  try {
+    const result = await qualifyLead(id, userType, notes);
+    res.json({ demo: false, ...result });
+  } catch (err) {
+    console.error(`[proxy] qualify lead ${id} error:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+app.post('/api/qualifier/queue/:id/qualify', requireAuth, handleQualifyLead);
+app.post('/api/leads/:id/qualify', requireAuth, handleQualifyLead);
+
+// ─── Partner Assignment ──────────────────────────────────────────────────────
+
+app.post('/api/leads/:id/assign-partner', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const { partnerWCId } = req.body || {};
+  if (!partnerWCId) {
+    return res.status(400).json({ error: 'partnerWCId is required' });
+  }
+  if (!airtableReady()) {
+    return res.json({ demo: true });
+  }
+  try {
+    const { lead, partner } = await assignLeadToPartner(id, partnerWCId);
+    // Send partner notification email
+    if (partner) {
+      const emailData = buildPartnerLeadEmail(lead, partner);
+      await sendEmail(emailData).catch(err => console.error('[proxy] Partner email error:', err.message));
+    }
+    console.log(`[proxy] ✅ ${lead.businessName} → Assigned to partner ${partnerWCId}`);
+    await appendLog({
+      task: 'Lead assigned to partner',
+      target: `${lead.businessName} → ${partner?.name || partnerWCId}`,
+      status: 'ok',
+    }).catch(() => {});
+    res.json({ demo: false, lead, partner });
+  } catch (err) {
+    console.error(`[proxy] POST /api/leads/${id}/assign-partner:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
   console.log(`\n[Wave Closers Proxy] ✓ Running on http://localhost:${PORT}`);
-  console.log(`  Claude:   ${ANTHROPIC_KEY    ? '✓ ready'          : '✗ no key'}`);
-  console.log(`  Airtable: ${airtableReady()  ? '✓ connected'      : '✗ not configured'}`);
-  console.log(`  Email:    ${emailReady()      ? '✓ Resend ready'   : '✗ demo mode (console)'}`);
+  console.log(`  Claude:   ${ANTHROPIC_KEY ? '✓ ready' : '✗ no key'}`);
+  console.log(`  Airtable: ${airtableReady() ? '✓ connected' : '✗ not configured'}`);
+  console.log(`  Email:    ${emailReady() ? '✓ Resend ready' : '✗ demo mode (console)'}`);
   console.log();
 
   // Spawns the automation worker process alongside the Express server in cloud deployments

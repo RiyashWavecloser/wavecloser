@@ -7,11 +7,14 @@ const ALL_NAV = [
   { id:'onboarding', label:'Onboarding Flow',    icon:'⇢' },
   { id:'automation', label:'AI Automation',      icon:'✦' },
   { id:'franchise',  label:'Franchise Research', icon:'◈' },
+  { id:'leads',      label:'Lead Generation',    icon:'⚡' },
   { id:'data',       label:'Data Integration',   icon:'⇌' },
   { id:'settings',   label:'Settings',           icon:'⚙' },
+  { id:'qualifier-portal',    label:'My Queue',    icon:'🔔' },
+  { id:'qualifier-completed', label:'My Completed', icon:'📋' },
 ];
 
-export default function Sidebar({ view, setView, dataMode, user, onLogout }) {
+export default function Sidebar({ view, setView, dataMode, user, onLogout, leadBadge }) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const name = user?.name || 'Riyash';
@@ -43,6 +46,19 @@ export default function Sidebar({ view, setView, dataMode, user, onLogout }) {
             >
               <span style={S.icon}>{item.icon}</span>
               <span>{item.label}</span>
+              {item.id === 'leads' && leadBadge > 0 && (
+                <span style={{
+                  marginLeft: 'auto',
+                  background: 'var(--color-red, #D44A4A)',
+                  color: 'white',
+                  fontSize: 10,
+                  fontWeight: 'bold',
+                  padding: '2px 6px',
+                  borderRadius: 10,
+                  minWidth: 16,
+                  textAlign: 'center'
+                }}>{leadBadge}</span>
+              )}
             </button>
           ))}
         </nav>

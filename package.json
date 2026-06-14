@@ -1,9 +1,9 @@
 {
   "name": "wave-closers-console",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
-  "description": "Wave Closers — PM/Ops/AI internal operations console. Built per Project Scope v2.2.",
+  "description": "Wave Closers — PM/Ops/AI internal operations console + AI Lead Generation Engine. Built per Project Scope v3.0.",
   "scripts": {
     "start":       "node server/claude-proxy.js",
     "dev":         "vite",
@@ -14,7 +14,9 @@
     "seed:staff":  "node scripts/seed-staff.mjs",
     "worker":      "node server/automationWorker.js",
     "worker:test": "node server/automationWorker.js --test-mode",
-    "dev:all":     "concurrently --names \"vite,proxy,worker\" --prefix-colors \"cyan,yellow,magenta\" \"npm run dev\" \"npm run server\" \"npm run worker\""
+    "leads":       "node server/leadWorker.js",
+    "leads:test":  "node server/leadWorker.js --test-mode",
+    "dev:all":     "concurrently --names \"vite,proxy,worker,leads\" --prefix-colors \"cyan,yellow,magenta,green\" \"npm run dev\" \"npm run server\" \"npm run worker\" \"npm run leads\""
   },
   "dependencies": {
     "airtable":   "^0.12.2",

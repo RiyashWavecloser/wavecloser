@@ -24,6 +24,8 @@ const resend = process.env.RESEND_API_KEY
 const FROM          = process.env.EMAIL_FROM            || 'riyashpatel3@gmail.com';
 const RIYASH_EMAIL  = process.env.RIYASH_EMAIL          || 'riyashpatel3@gmail.com';
 const WILLIAM_EMAIL = process.env.WILLIAM_EMAIL         || 'william@waveclosers.com';
+const QUALIFIER_EMAIL = process.env.QUALIFIER_EMAIL     || 'qualifier@waveclosers.com';
+const RECRUITER_EMAIL = process.env.RECRUITER_EMAIL     || 'recruiter@waveclosers.com';
 
 // ─── Pending placeholder values ───────────────────────────────────────────────
 const CONTRACT_URL    = process.env.CONTRACT_TEMPLATE_URL  || 'https://waveclosers.com/contract (PENDING)';
@@ -94,7 +96,7 @@ Your earning model: ${earning}
 Your support team:
 - Leads sent to your landing page by Sergey (Marketer)
 - Thursday sales training run by Matt (${TRAINING_TIME})
-- Onboarding questions: contact Mildred (Customer Experience)
+- Onboarding questions: contact CX Team (Customer Experience)
 
 Your dashboard: https://waveclosers.com/user/dashboard
 
@@ -105,12 +107,12 @@ Wave Closers Operations`;
   return { to: user.email, subject, text };
 }
 
-// ─── Template 2 — Contract dispatch (to Mildred / CX) ────────────────────────
+// ─── Template 2 — Contract dispatch (to Qualifier / CX) ──────────────────────
 
 export function buildContractEmail(user) {
   const label   = TYPE_LABELS[user.type] || user.type;
   const subject = `[Action required] New closed user — ${user.name} (${label})`;
-  const text = `Hi Mildred,
+  const text = `Hi,
 
 ${user.name} has been closed and is ready for CX onboarding.
 
@@ -129,7 +131,7 @@ Please complete within 3 business days.
 
 Riyash (PM)
 Wave Closers Operations`;
-  return { to: RIYASH_EMAIL, subject, text }; // Mildred receives via Riyash's routing
+  return { to: RIYASH_EMAIL, subject, text }; // CX receives via Riyash's routing
 }
 
 // ─── Template 3 — Lead shortfall alert (Sergey via Riyash) ───────────────────
@@ -209,7 +211,7 @@ Access your training portal here: ${LEARNING_URL}
 
 Complete your onboarding modules before your first Thursday session.
 
-Mildred
+CX Team
 Wave Closers Customer Experience`;
   return { to: user.email, subject, text };
 }
@@ -227,7 +229,7 @@ Join here: ${TRAINING_LINK}
 
 Hosted by Matt (Sales Trainer). Attendance strongly recommended.
 
-Mildred
+CX Team
 Wave Closers Customer Experience`;
   return { to: user.email, subject, text };
 }
@@ -246,7 +248,78 @@ Wave Closers Security`;
   return { to: email, subject, text };
 }
 
-export { RIYASH_EMAIL, WILLIAM_EMAIL, FROM };
+// ─── Template 6 — Qualifier auto-notification (Interested lead) ──────────────
+
+export function buildQualifierLeadEmail(lead) {
+  const subject = `New Interested Lead — ${lead.businessName}, ${lead.market || ''}`;
+  const text = `Hi,
+
+A new interested lead has come in from the cold-calling team.
+
+Business:    ${lead.businessName}
+Type:        ${lead.type || ''}
+Address:     ${lead.address || ''}
+Phone:       ${lead.phone || ''}
+Score:       ${lead.score}/100
+Why:         ${lead.scoreReason || ''}
+Called by:   ${lead.assignedAgent || ''}
+Agent notes: ${lead.agentNotes || 'N/A'}
+
+Please qualify this lead and identify their user type.
+
+Log in to take action: https://ops.waveclosers.com
+
+Riyash
+Wave Closers Operations`;
+  return { to: QUALIFIER_EMAIL, subject, text };
+}
+
+// ─── Template 7 — Partner lead assignment ─────────────────────────────────────
+
+export function buildPartnerLeadEmail(lead, partner) {
+  const subject = `New lead assigned to you — ${lead.businessName}, ${lead.market || ''}`;
+  const text = `Hi ${(partner.name || '').split(' ')[0]},
+
+A new lead has been assigned to you.
+
+Business: ${lead.businessName}
+Address:  ${lead.address || ''}
+Phone:    ${lead.phone || ''}
+Type:     ${lead.type || ''}
+Score:    ${lead.score}/100
+
+Log in to follow up: https://ops.waveclosers.com
+
+Riyash
+Wave Closers Operations`;
+  return { to: partner.email || RIYASH_EMAIL, subject, text };
+}
+
+// ─── Template 8 — Recruiter routing (Reseller / ISO qualified lead) ───────────
+
+export function buildRecruiterLeadEmail(lead) {
+  const subject = `New lead for you to close — ${lead.businessName}, ${lead.market || ''}`;
+  const text = `Hi,
+
+A new qualified lead has been routed to you.
+
+Business:          ${lead.businessName}
+Type:              ${lead.qualifiedUserType || ''}
+Address:           ${lead.address || ''}
+Phone:             ${lead.phone || ''}
+Score:             ${lead.score}/100
+Qualifier's notes: "${lead.qualifierNotes || 'N/A'}"
+
+Please reach out and close this deal.
+
+Log in: https://ops.waveclosers.com
+
+Riyash
+Wave Closers Operations`;
+  return { to: RECRUITER_EMAIL, subject, text };
+}
+
+export { RIYASH_EMAIL, WILLIAM_EMAIL, QUALIFIER_EMAIL, RECRUITER_EMAIL, FROM };
 
 export function isConfigured() { return !!process.env.RESEND_API_KEY; }
 

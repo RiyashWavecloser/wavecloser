@@ -141,7 +141,7 @@ async function runContractDispatch(user) {
   if (alreadyDone(key)) return;
   markDone(key);
   await sendEmail(buildContractEmail(user)).catch(console.error);
-  await log('Contract dispatch', `${user.name} → Mildred (CX)`, 'sent');
+  await log('Contract dispatch', `${user.name} → CX Team`, 'sent');
 }
 
 /** #4 — Online learning enrollment (PENDING open item #5) */

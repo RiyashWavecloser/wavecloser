@@ -11,11 +11,14 @@ const OnboardingFlow    = lazy(() => import('./modules/OnboardingFlow.jsx'));
 const AutomationPanel   = lazy(() => import('./modules/AutomationPanel.jsx'));
 const FranchiseResearch = lazy(() => import('./modules/FranchiseResearch.jsx'));
 const DataIntegration   = lazy(() => import('./modules/DataIntegration.jsx'));
+const LeadGeneration    = lazy(() => import('./modules/LeadGeneration.jsx'));
 const Settings          = lazy(() => import('./modules/Settings.jsx'));
 const Login             = lazy(() => import('./modules/Login.jsx'));
 const ChangePassword    = lazy(() => import('./modules/ChangePassword.jsx'));
+const AgentPortal       = lazy(() => import('./modules/AgentPortal.jsx'));
+const QualifierPortal   = lazy(() => import('./modules/QualifierPortal.jsx'));
 
-import { SEED_USERS } from './data/seed.js';
+import { SEED_USERS, SEED_LEADS } from './data/seed.js';
 import {
   fetchUsersFromAPI,
   createUserAPI,
@@ -24,6 +27,9 @@ import {
   getSession,
   setSession,
   clearMustChangePassword,
+  fetchQualifierQueueAPI,
+  fetchLeadsFromAPI,
+  loadLeadsFromStorage,
 } from './lib/dataLayer.js';
 import { ROLE_USER_FILTER, canAccess, defaultView, ROLES } from './data/roles.js';
 
@@ -77,6 +83,50 @@ export default function App() {
 
   const role = session.user?.role || ROLES.ADMIN;
   const mustChangePassword = !!session.mustChangePassword;
+
+  const [leadBadge, setLeadBadge] = useState(0);
+  const [uncalledLeadsCount, setUncalledLeadsCount] = useState(0);
+
+  // Poll Qualifier Queue to update Lead Generation Sidebar badge + uncalled leads count
+  useEffect(() => {
+    if (!session.token || mustChangePassword) return;
+
+    const updateBadge = () => {
+      fetchQualifierQueueAPI()
+        .then(queue => {
+          if (queue && Array.isArray(queue)) {
+            const count = queue.filter(l => !l.qualifierStatus || l.qualifierStatus === 'QualifierNew').length;
+            setLeadBadge(count);
+          } else {
+            const stored = loadLeadsFromStorage() || SEED_LEADS;
+            const count = stored.filter(l => l.status === 'SentToQualifier').length;
+            setLeadBadge(count);
+          }
+        })
+        .catch(() => {
+          const stored = loadLeadsFromStorage() || SEED_LEADS;
+          const count = stored.filter(l => l.status === 'SentToQualifier').length;
+          setLeadBadge(count);
+        });
+
+      // Also update uncalled leads count
+      fetchLeadsFromAPI()
+        .then(live => {
+          const all = live && live.length ? live : (loadLeadsFromStorage() || SEED_LEADS);
+          const uncalled = all.filter(l => l.assignedAgent && !l.calledAt && !l.outcome).length;
+          setUncalledLeadsCount(uncalled);
+        })
+        .catch(() => {
+          const stored = loadLeadsFromStorage() || SEED_LEADS;
+          const uncalled = stored.filter(l => l.assignedAgent && !l.calledAt && !l.outcome).length;
+          setUncalledLeadsCount(uncalled);
+        });
+    };
+
+    updateBadge();
+    const interval = setInterval(updateBadge, 15000);
+    return () => clearInterval(interval);
+  }, [session.token, mustChangePassword]);
 
   // On login, jump to the default view
   useEffect(() => {
@@ -192,6 +242,17 @@ export default function App() {
     );
   }
 
+  // Agent Portal — standalone, no sidebar
+  if (role === 'agent') {
+    return (
+      <Suspense fallback={<ViewLoading />}>
+        <AgentPortal currentUser={session.user} onLogout={handleLogout} />
+      </Suspense>
+    );
+  }
+
+  // Qualifier uses sidebar layout — no standalone rendering
+
   const safeView = canAccess(role, view) ? view : defaultView(role);
 
   return (
@@ -202,6 +263,7 @@ export default function App() {
         dataMode={dataMode}
         user={session.user}
         onLogout={handleLogout}
+        leadBadge={leadBadge}
       />
       <main className="wc-main" style={{ flex:1, padding:'0 32px 32px 32px', minWidth:0 }}>
         <TopBar
@@ -213,7 +275,7 @@ export default function App() {
 
         <Suspense fallback={<ViewLoading />}>
           {safeView === 'dashboard'  && (
-            <Dashboard users={roleFilteredUsers} onSelectUser={setSelectedUser} />
+            <Dashboard users={roleFilteredUsers} onSelectUser={setSelectedUser} uncalledLeadsCount={uncalledLeadsCount} />
           )}
           {safeView === 'users' && (
             <Users
@@ -235,6 +297,7 @@ export default function App() {
           )}
           {safeView === 'automation' && <AutomationPanel users={roleFilteredUsers} />}
           {safeView === 'franchise'  && <FranchiseResearch />}
+          {safeView === 'leads'      && <LeadGeneration users={users} setUsers={setUsers} setLeadBadge={setLeadBadge} />}
           {safeView === 'data'       && (
             <DataIntegration
               dataMode={dataMode}
@@ -245,6 +308,12 @@ export default function App() {
           )}
           {safeView === 'settings'   && (
             <Settings dataMode={dataMode} setDataMode={setDataMode} />
+          )}
+          {safeView === 'qualifier-portal' && (
+            <QualifierPortal currentUser={session.user} onLogout={handleLogout} setUsers={setUsers} embedded />
+          )}
+          {safeView === 'qualifier-completed' && (
+            <QualifierPortal currentUser={session.user} onLogout={handleLogout} setUsers={setUsers} embedded completedView />
           )}
         </Suspense>
       </main>

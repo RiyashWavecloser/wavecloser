@@ -181,7 +181,7 @@ export default function QualifierPortal({ currentUser: _currentUser, onLogout, e
         if (prev.some(u => u.id === res.newUser.id)) return prev;
         return [...prev, res.newUser];
       });
-    } else if ((!res || res.demo) && setUsers && (qualifyType === 'REFERRAL' || qualifyType === 'REP')) {
+    } else if ((!res || res.demo) && setUsers) {
       const nextId = 'WC-' + (1000 + Math.floor(Math.random() * 9000));
       const newUser = {
         id: nextId,
@@ -201,7 +201,7 @@ export default function QualifierPortal({ currentUser: _currentUser, onLogout, e
     if (routeTo === 'CX') {
       showToast(`${lead.businessName} → ${USER_TYPES[qualifyType]?.label} → New user created in Dashboard!`);
     } else {
-      showToast(`${lead.businessName} → ${USER_TYPES[qualifyType]?.label} → Recruiter notified!`);
+      showToast(`${lead.businessName} → ${USER_TYPES[qualifyType]?.label} → New user created & Recruiter notified!`);
     }
   }
 

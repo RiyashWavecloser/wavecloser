@@ -215,6 +215,7 @@ export default function LeadGeneration({ users = [], setUsers, setLeadBadge }) {
     interested:  leads.filter(l => l.status === 'Interested').length,
     qualifierQueue:leads.filter(l => l.status === 'SentToQualifier').length,
     called:      leads.filter(l => l.calledAt).length,
+    uncalled:    leads.filter(l => l.assignedAgent && !l.calledAt && !l.outcome).length,
     avgScore:    leads.length ? Math.round(leads.reduce((s, l) => s + l.score, 0) / leads.length) : 0,
   }), [leads]);
 
@@ -291,6 +292,7 @@ export default function LeadGeneration({ users = [], setUsers, setLeadBadge }) {
         <StatCard label="Total leads"  value={summary.total}      sub="in system" />
         <StatCard label="New"          value={summary.newLeads}   sub="unassigned" tone="green" />
         <StatCard label="Assigned"     value={summary.assigned}   sub="to agents" />
+        <StatCard label="Uncalled"     value={summary.uncalled}   sub="calls left" tone="amber" />
         <StatCard label="Qualifier Queue" value={summary.qualifierQueue} sub="hot leads" tone="amber" />
         <StatCard label="Called"       value={summary.called}     sub="today" />
         <StatCard label="Avg score"    value={summary.avgScore}   sub="out of 100" />
@@ -835,7 +837,7 @@ function LeadRow({ lead, rank, onAssign, onMarkCalled, onSkip }) {
 const S = {
   toast:       { position: 'fixed', top: 16, left: '50%', transform: 'translateX(-50%)', padding: '12px 24px', borderRadius: 8, color: '#fff', fontSize: 14, fontWeight: 600, zIndex: 200, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', maxWidth: '90vw', textAlign: 'center' },
   wrap:        { display: 'flex', flexDirection: 'column', gap: 16 },
-  statGrid:    { display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12 },
+  statGrid:    { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 12 },
   twoCol:      { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 },
   demoBanner:  { background: 'var(--color-info-bg)', border: '1px solid var(--color-info)', borderRadius: 8, padding: '10px 16px', fontSize: 12, color: 'var(--color-info-text)', lineHeight: 1.6 },
 

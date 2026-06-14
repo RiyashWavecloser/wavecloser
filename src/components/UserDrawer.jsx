@@ -58,8 +58,8 @@ export default function UserDrawer({ user, onClose, onUpdateUser }) {
   }
 
   const routingNote = (user.type === 'REFERRAL' || user.type === 'REP')
-    ? '→ CX direct (Mildred onboards immediately)'
-    : '→ Janina (Recruiter) closes deal → Mildred (CX) onboards';
+    ? '→ CX Team direct (onboards immediately)'
+    : '→ Recruiter closes deal → CX Team onboards';
 
   return (
     <>

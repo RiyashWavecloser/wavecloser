@@ -13,7 +13,7 @@ import UserTable from '../components/UserTable.jsx';
  *   - Alert banner when users are at-risk or below target
  *   - Lead trend extended to last 6 weeks (W1–W6)
  */
-export default function Dashboard({ users, onSelectUser }) {
+export default function Dashboard({ users, onSelectUser, uncalledLeadsCount = 0 }) {
   const stats = useMemo(() => {
     const total       = users.length;
     const onTrack     = users.filter(u => computeStatus(u).tier === 'green').length;
@@ -66,6 +66,7 @@ export default function Dashboard({ users, onSelectUser }) {
         <StatCard label="On track"         value={stats.onTrack}     sub="hitting benchmarks" tone="green" />
         <StatCard label="At risk"          value={stats.atRisk}      sub="below 70% quota"    tone="amber" />
         <StatCard label="Below target"     value={stats.belowTarget} sub="needs follow-up"    tone="red" />
+        <StatCard label="Uncalled leads"   value={uncalledLeadsCount} sub="calls left to do"  tone="amber" />
         <StatCard label="Leads this week"  value={stats.totalLeads}  sub="across all users" />
         <StatCard label="Deals this month" value={stats.totalDeals}  sub="closed so far" />
       </div>
@@ -118,6 +119,6 @@ export default function Dashboard({ users, onSelectUser }) {
 const styles = {
   wrap:       { display:'flex', flexDirection:'column', gap:16 },
   alertBanner:{ background:'var(--color-amber-bg)', border:'1px solid var(--color-amber)', borderRadius:8, padding:'12px 16px', fontSize:13, color:'var(--color-amber-text)', lineHeight:1.6 },
-  statGrid:   { display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:12 },
+  statGrid:   { display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:12 },
   twoCol:     { display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 },
 };

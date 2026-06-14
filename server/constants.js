@@ -29,3 +29,17 @@ export const EARNING_MODELS = {
   RESELLER: '$1,500–$3,000 bonus + 40% recurring revenue + qualified leads',
   ISO:      'Done-for-you investment model — we handle everything',
 };
+
+// ─── Module 6 — Lead generation constants ─────────────────────────────────────
+
+export const DAILY_LEADS_PER_AGENT = Number(process.env.DAILY_LEADS_PER_AGENT || 100);
+export const NUM_AGENTS            = Number(process.env.NUM_AGENTS || 10);
+
+export const BUSINESS_TYPES = [
+  'restaurant', 'beauty_salon', 'nail_salon', 'deli', 'massage', 'small_retail',
+];
+
+export const LEAD_STATUSES = [
+  'New', 'Assigned', 'Called', 'Interested', 'NotInterested', 'Callback', 'NoAnswer',
+];
+
