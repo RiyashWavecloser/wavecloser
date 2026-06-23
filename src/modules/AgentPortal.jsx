@@ -1,12 +1,22 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { SEED_LEADS } from '../data/seed.js';
-import { BUSINESS_TYPES, DAILY_LEADS_PER_AGENT } from '../data/constants.js';
+import { BUSINESS_TYPES } from '../data/constants.js';
 import {
   fetchMyLeadsAPI,
   updateLeadAPI,
   loadLeadsFromStorage,
   saveLeadsToStorage,
 } from '../lib/dataLayer.js';
+
+// Helper to get the Monday of the current week (same logic as backend)
+const getMondayOfCurrentWeek = () => {
+  const d = new Date();
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  const monday = new Date(d.setDate(diff));
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+};
 
 /**
  * AgentPortal — Mobile-first standalone view for cold-calling agents.
@@ -20,6 +30,10 @@ export default function AgentPortal({ currentUser, onLogout }) {
   const [search, setSearch] = useState('');
   const [toast, setToast] = useState(null);
   const [isDemo, setIsDemo] = useState(true);
+  const [viewMode, setViewMode] = useState('recommended'); // 'recommended' or 'weekly'
+
+  const WEEKLY_TARGET = 500;
+  const DAILY_TARGET = 100;
 
   // Load leads on mount and poll every 15 seconds
   const loadMyLeads = useCallback(async () => {
@@ -66,7 +80,33 @@ export default function AgentPortal({ currentUser, onLogout }) {
     return s;
   }, [leads]);
 
-  // Filtered leads
+  // Current week's leads (assigned or called this week)
+  const weeklyLeads = useMemo(() => {
+    const monday = getMondayOfCurrentWeek();
+    return leads.filter(l => {
+      const date = l.calledAt ? new Date(l.calledAt) : new Date(l.createdAt || Date.now());
+      return date >= monday;
+    });
+  }, [leads]);
+
+  const weeklyCalledCount = useMemo(() => {
+    return weeklyLeads.filter(l => ['Interested', 'NotInterested', 'Callback', 'NoAnswer'].includes(l.outcome)).length;
+  }, [weeklyLeads]);
+
+  const weeklyUncalledCount = useMemo(() => {
+    return weeklyLeads.filter(l => !l.outcome).length;
+  }, [weeklyLeads]);
+
+  // Daily target called count
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const calledToday = useMemo(() => {
+    return leads.filter(l => l.calledAt && l.calledAt.startsWith(todayStr)).length;
+  }, [leads, todayStr]);
+
+  // Weekly progress percentage
+  const weeklyProgress = Math.round((weeklyCalledCount / WEEKLY_TARGET) * 100);
+
+  // Filtered leads for the "weekly" tab view
   const filtered = useMemo(() => {
     let list = leads;
     if (filter === 'uncalled')    list = list.filter(l => !l.outcome);
@@ -78,6 +118,25 @@ export default function AgentPortal({ currentUser, onLogout }) {
     }
     return list;
   }, [leads, filter, search]);
+
+  // Lists for the "Today's Recommended" view
+  const callbacksList = useMemo(() => {
+    let list = leads.filter(l => l.outcome === 'Callback');
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter(l => l.businessName.toLowerCase().includes(q));
+    }
+    return list;
+  }, [leads, search]);
+
+  const recommendedFocusList = useMemo(() => {
+    let list = leads.filter(l => !l.outcome);
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter(l => l.businessName.toLowerCase().includes(q));
+    }
+    return list.slice(0, 100);
+  }, [leads, search]);
 
   // Mark lead outcome
   async function handleOutcome(lead, outcome) {
@@ -124,8 +183,57 @@ export default function AgentPortal({ currentUser, onLogout }) {
     return '#D44A4A';
   }
 
-  const progress = Math.round((stats.called / Math.max(DAILY_LEADS_PER_AGENT, stats.total)) * 100);
   const typeIcon = (type) => BUSINESS_TYPES.find(t => t.id === type)?.icon || '🏢';
+
+  const renderLeadCard = (lead, index) => {
+    return (
+      <div key={lead.placeId} style={{
+        ...S.leadCard,
+        borderLeft: `4px solid ${lead.outcome === 'Interested' ? '#2D9B5E' : lead.outcome === 'NotInterested' ? '#D44A4A' : lead.outcome === 'Callback' ? '#D49A2B' : lead.outcome === 'NoAnswer' ? '#999' : '#5B8DEF'}`,
+      }}>
+        <div style={S.leadHeader}>
+          <span style={S.leadRank}>#{index + 1}</span>
+          <span style={S.leadName}>{lead.businessName}</span>
+          <span style={S.leadType}>{typeIcon(lead.type)} {BUSINESS_TYPES.find(t => t.id === lead.type)?.label || lead.type}</span>
+        </div>
+        <div style={S.leadAddress}>{lead.address}</div>
+        <a href={`tel:${lead.phone?.replace(/\D/g, '')}`} style={S.leadPhone}>
+          📞 {lead.phone}
+        </a>
+        <div style={S.scoreRow}>
+          <span style={{ fontSize: 12, color: '#888' }}>Score:</span>
+          <div style={S.scoreBarOuter}>
+            <div style={{ ...S.scoreBarInner, width: `${lead.score}%`, background: scoreColor(lead.score) }} />
+          </div>
+          <span style={{ fontSize: 13, fontWeight: 700, color: scoreColor(lead.score) }}>{lead.score}</span>
+        </div>
+        {lead.scoreReason && <div style={S.scoreReason}>{lead.scoreReason}</div>}
+
+        {/* Notes */}
+        <input
+          type="text"
+          placeholder="Add call notes..."
+          defaultValue={lead.agentNotes || ''}
+          onBlur={e => handleNotesBlur(lead, e.target.value)}
+          style={S.notesInput}
+        />
+
+        {/* Action buttons */}
+        {!lead.outcome ? (
+          <div style={S.actionRow}>
+            <button onClick={() => handleOutcome(lead, 'Interested')} style={{ ...S.actionBtn, background: '#2D9B5E', color: '#fff' }}>✅ Interested</button>
+            <button onClick={() => handleOutcome(lead, 'NotInterested')} style={{ ...S.actionBtn, background: '#D44A4A', color: '#fff' }}>❌ No</button>
+            <button onClick={() => handleOutcome(lead, 'Callback')} style={{ ...S.actionBtn, background: '#D49A2B', color: '#fff' }}>📞 CB</button>
+            <button onClick={() => handleOutcome(lead, 'NoAnswer')} style={{ ...S.actionBtn, background: '#888', color: '#fff' }}>🔇</button>
+          </div>
+        ) : (
+          <div style={{ ...S.outcomeBadge, background: lead.outcome === 'Interested' ? '#E8F4EA' : lead.outcome === 'NotInterested' ? '#FBE5E5' : lead.outcome === 'Callback' ? '#FBF1DD' : '#F0F0F0', color: lead.outcome === 'Interested' ? '#1F6E3C' : lead.outcome === 'NotInterested' ? '#9B2727' : lead.outcome === 'Callback' ? '#8A5A1A' : '#666' }}>
+            {lead.outcome === 'Interested' ? '✅ Interested — Qualifier notified' : lead.outcome === 'NotInterested' ? '❌ Not Interested' : lead.outcome === 'Callback' ? '📞 Callback scheduled' : '🔇 No Answer'}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div style={S.root}>
@@ -161,18 +269,28 @@ export default function AgentPortal({ currentUser, onLogout }) {
       {/* Progress */}
       <div style={S.progressCard}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-          <div style={S.progressLabel}>Today&apos;s Progress</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: stats.uncalled > 0 ? '#FFF3E0' : '#E8F4EA', padding: '6px 14px', borderRadius: 20, border: stats.uncalled > 0 ? '1px solid #FFB74D' : '1px solid #81C784' }}>
-            <span style={{ fontSize: 18 }}>{stats.uncalled > 0 ? '📞' : '🎉'}</span>
-            <span style={{ fontSize: 14, fontWeight: 700, color: stats.uncalled > 0 ? '#E65100' : '#2E7D32' }}>
-              {stats.uncalled > 0 ? `${stats.uncalled} calls left` : 'All done!'}
+          <div style={S.progressLabel}>Weekly Progress</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: weeklyCalledCount >= WEEKLY_TARGET ? '#E8F4EA' : '#FFF3E0', padding: '6px 14px', borderRadius: 20, border: weeklyCalledCount >= WEEKLY_TARGET ? '1px solid #81C784' : '1px solid #FFB74D' }}>
+            <span style={{ fontSize: 18 }}>{weeklyCalledCount >= WEEKLY_TARGET ? '🎉' : '📞'}</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: weeklyCalledCount >= WEEKLY_TARGET ? '#2E7D32' : '#E65100' }}>
+              {weeklyCalledCount >= WEEKLY_TARGET ? 'Weekly Goal Met!' : `${WEEKLY_TARGET - weeklyCalledCount} calls left`}
             </span>
           </div>
         </div>
         <div style={S.progressBarOuter}>
-          <div style={{ ...S.progressBarInner, width: `${Math.min(progress, 100)}%` }} />
+          <div style={{ ...S.progressBarInner, width: `${Math.min(weeklyProgress, 100)}%` }} />
         </div>
-        <div style={S.progressText}>{stats.called} called · {stats.uncalled} uncalled · {stats.total} total</div>
+        <div style={S.progressText}>{weeklyCalledCount} called this week · {weeklyUncalledCount} uncalled · {WEEKLY_TARGET} weekly target</div>
+        
+        {/* Daily Recommended Target Guideline */}
+        <div style={{ marginTop: 14, borderTop: '1px solid #EEE', paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 13, color: '#666', fontWeight: 600 }}>Daily Goal (Recommended)</span>
+          <span style={{ fontSize: 13, color: '#1A1A1A', fontWeight: 700 }}>{calledToday} / {DAILY_TARGET} called today</span>
+        </div>
+        <div style={{ ...S.progressBarOuter, height: 6, marginTop: 6 }}>
+          <div style={{ ...S.progressBarInner, height: '100%', width: `${Math.min((calledToday / DAILY_TARGET) * 100, 100)}%`, background: '#5B8DEF' }} />
+        </div>
+
         <div style={S.statsRow}>
           <span style={{ ...S.statPill, background: '#E8F4EA', color: '#1F6E3C' }}>✅ {stats.interested}</span>
           <span style={{ ...S.statPill, background: '#FBE5E5', color: '#9B2727' }}>❌ {stats.notInterested}</span>
@@ -181,85 +299,98 @@ export default function AgentPortal({ currentUser, onLogout }) {
         </div>
       </div>
 
-      {/* Filter bar */}
-      <div style={S.filterBar}>
-        <select value={filter} onChange={e => setFilter(e.target.value)} style={S.filterSelect}>
-          <option value="all">All ({leads.length})</option>
-          <option value="uncalled">Uncalled ({stats.uncalled})</option>
-          <option value="callbacks">Callbacks ({stats.callback})</option>
-          <option value="interested">Interested ({stats.interested})</option>
-        </select>
-        <input
-          type="text"
-          placeholder="Search business..."
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          style={S.searchInput}
-        />
+      {/* View Mode Toggle */}
+      <div style={S.toggleContainer}>
+        <button 
+          onClick={() => setViewMode('recommended')} 
+          style={{ ...S.toggleBtn, ...(viewMode === 'recommended' ? S.toggleBtnActive : {}) }}
+        >
+          📋 Today&apos;s Recommended
+        </button>
+        <button 
+          onClick={() => setViewMode('weekly')} 
+          style={{ ...S.toggleBtn, ...(viewMode === 'weekly' ? S.toggleBtnActive : {}) }}
+        >
+          📅 Full Weekly Batch
+        </button>
       </div>
+
+      {/* Search Bar / Filter Bar for Weekly View */}
+      {viewMode === 'weekly' && (
+        <div style={S.filterBar}>
+          <select value={filter} onChange={e => setFilter(e.target.value)} style={S.filterSelect}>
+            <option value="all">All ({leads.length})</option>
+            <option value="uncalled">Uncalled ({stats.uncalled})</option>
+            <option value="callbacks">Callbacks ({stats.callback})</option>
+            <option value="interested">Interested ({stats.interested})</option>
+          </select>
+          <input
+            type="text"
+            placeholder="Search business..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            style={S.searchInput}
+          />
+        </div>
+      )}
+
+      {/* Search Bar only for Recommended View */}
+      {viewMode === 'recommended' && (
+        <div style={{ ...S.filterBar, marginBottom: 8 }}>
+          <input
+            type="text"
+            placeholder="Search in recommended focus..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            style={S.searchInput}
+          />
+        </div>
+      )}
 
       {/* Leads list */}
       <div style={S.leadsList}>
-        {filtered.length === 0 && (
-          <div style={S.emptyState}>
-            {leads.length === 0
-              ? 'No leads assigned yet. Riyash will assign leads to you soon.'
-              : 'No leads match this filter.'}
-          </div>
-        )}
-        {filtered.map((lead, i) => (
-          <div key={lead.placeId} style={{
-            ...S.leadCard,
-            borderLeft: `4px solid ${lead.outcome === 'Interested' ? '#2D9B5E' : lead.outcome === 'NotInterested' ? '#D44A4A' : lead.outcome === 'Callback' ? '#D49A2B' : lead.outcome === 'NoAnswer' ? '#999' : '#5B8DEF'}`,
-          }}>
-            <div style={S.leadHeader}>
-              <span style={S.leadRank}>#{i + 1}</span>
-              <span style={S.leadName}>{lead.businessName}</span>
-              <span style={S.leadType}>{typeIcon(lead.type)} {BUSINESS_TYPES.find(t => t.id === lead.type)?.label || lead.type}</span>
-            </div>
-            <div style={S.leadAddress}>{lead.address}</div>
-            <a href={`tel:${lead.phone?.replace(/\D/g, '')}`} style={S.leadPhone}>
-              📞 {lead.phone}
-            </a>
-            <div style={S.scoreRow}>
-              <span style={{ fontSize: 12, color: '#888' }}>Score:</span>
-              <div style={S.scoreBarOuter}>
-                <div style={{ ...S.scoreBarInner, width: `${lead.score}%`, background: scoreColor(lead.score) }} />
-              </div>
-              <span style={{ fontSize: 13, fontWeight: 700, color: scoreColor(lead.score) }}>{lead.score}</span>
-            </div>
-            {lead.scoreReason && <div style={S.scoreReason}>{lead.scoreReason}</div>}
-
-            {/* Notes */}
-            <input
-              type="text"
-              placeholder="Add call notes..."
-              defaultValue={lead.agentNotes || ''}
-              onBlur={e => handleNotesBlur(lead, e.target.value)}
-              style={S.notesInput}
-            />
-
-            {/* Action buttons */}
-            {!lead.outcome ? (
-              <div style={S.actionRow}>
-                <button onClick={() => handleOutcome(lead, 'Interested')} style={{ ...S.actionBtn, background: '#2D9B5E', color: '#fff' }}>✅ Interested</button>
-                <button onClick={() => handleOutcome(lead, 'NotInterested')} style={{ ...S.actionBtn, background: '#D44A4A', color: '#fff' }}>❌ No</button>
-                <button onClick={() => handleOutcome(lead, 'Callback')} style={{ ...S.actionBtn, background: '#D49A2B', color: '#fff' }}>📞 CB</button>
-                <button onClick={() => handleOutcome(lead, 'NoAnswer')} style={{ ...S.actionBtn, background: '#888', color: '#fff' }}>🔇</button>
-              </div>
-            ) : (
-              <div style={{ ...S.outcomeBadge, background: lead.outcome === 'Interested' ? '#E8F4EA' : lead.outcome === 'NotInterested' ? '#FBE5E5' : lead.outcome === 'Callback' ? '#FBF1DD' : '#F0F0F0', color: lead.outcome === 'Interested' ? '#1F6E3C' : lead.outcome === 'NotInterested' ? '#9B2727' : lead.outcome === 'Callback' ? '#8A5A1A' : '#666' }}>
-                {lead.outcome === 'Interested' ? '✅ Interested — Qualifier notified' : lead.outcome === 'NotInterested' ? '❌ Not Interested' : lead.outcome === 'Callback' ? '📞 Callback scheduled' : '🔇 No Answer'}
+        {viewMode === 'recommended' ? (
+          <div>
+            {/* Callbacks Section */}
+            {callbacksList.length > 0 && (
+              <div>
+                <div style={S.sectionHeader}>📞 Callbacks from Earlier Days ({callbacksList.length})</div>
+                {callbacksList.map((lead, i) => renderLeadCard(lead, i))}
               </div>
             )}
+
+            {/* Today's Focus Section */}
+            <div>
+              <div style={S.sectionHeader}>🎯 Today&apos;s Recommended Focus ({recommendedFocusList.length} uncalled)</div>
+              {recommendedFocusList.length === 0 ? (
+                <div style={S.emptyState}>
+                  No uncalled leads in your recommended batch. Toggle to &quot;Full Weekly Batch&quot; or check for new assignments!
+                </div>
+              ) : (
+                recommendedFocusList.map((lead, i) => renderLeadCard(lead, i))
+              )}
+            </div>
           </div>
-        ))}
+        ) : (
+          /* Weekly Batch List View */
+          <div>
+            {filtered.length === 0 ? (
+              <div style={S.emptyState}>
+                {leads.length === 0
+                  ? 'No leads assigned yet. Riyash will assign leads to you soon.'
+                  : 'No leads match this filter.'}
+              </div>
+            ) : (
+              filtered.map((lead, i) => renderLeadCard(lead, i))
+            )}
+          </div>
+        )}
       </div>
 
       {/* Footer */}
       <div style={S.footer}>
         {stats.uncalled === 0 && stats.total > 0
-          ? <div style={S.footerText}>All caught up for today? Great work! 🎉</div>
+          ? <div style={S.footerText}>All caught up for the week? Great work! 🎉</div>
           : <div style={S.footerText}>Need more leads? Contact Riyash</div>}
       </div>
     </div>
@@ -285,6 +416,12 @@ const S = {
   progressText: { fontSize: 13, color: '#555', marginTop: 8 },
   statsRow: { display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' },
   statPill: { padding: '6px 12px', borderRadius: 6, fontSize: 13, fontWeight: 600 },
+  
+  toggleContainer: { display: 'flex', gap: 10, padding: '0 20px', marginBottom: 16 },
+  toggleBtn: { flex: 1, padding: '12px', borderRadius: 8, border: '1px solid #DDD', background: '#fff', color: '#555', fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.2s' },
+  toggleBtnActive: { background: '#1F4E79', color: '#fff', borderColor: '#1F4E79', boxShadow: '0 2px 8px rgba(31, 78, 121, 0.2)' },
+  sectionHeader: { fontSize: 13, fontWeight: 800, color: '#1F4E79', margin: '24px 0 12px 0', letterSpacing: '0.03em', textTransform: 'uppercase', borderBottom: '2px solid #EBE6DC', paddingBottom: 6 },
+
   filterBar: { display: 'flex', gap: 10, padding: '0 20px', marginBottom: 12 },
   filterSelect: { padding: '10px 14px', borderRadius: 6, border: '1px solid #DDD', fontSize: 14, background: '#fff', fontFamily: 'inherit', minHeight: 44 },
   searchInput: { flex: 1, padding: '10px 14px', borderRadius: 6, border: '1px solid #DDD', fontSize: 14, fontFamily: 'inherit', minHeight: 44 },

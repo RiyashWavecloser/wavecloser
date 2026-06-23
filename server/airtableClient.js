@@ -887,3 +887,167 @@ export async function getLeadById(id) {
   });
 }
 
+// ─── Weekly Lead Model Helpers & Refill Logic ────────────────────────────────
+
+export function getMondayOfCurrentWeek() {
+  const d = new Date();
+  const day = d.getDay();
+  // Adjust so Monday is day 1, and Sunday (0) is shifted to previous Monday (-6)
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  const monday = new Date(d.setDate(diff));
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+}
+
+export function isBeforeFriday() {
+  const now = new Date();
+  const day = now.getDay(); // 0 = Sunday, 1 = Monday, ..., 5 = Friday, 6 = Saturday
+  if (day >= 1 && day < 5) return true;
+  if (day === 5 && now.getHours() < 17) return true;
+  return false;
+}
+
+export async function getUnassignedLeads(limit = 6000) {
+  if (!isConfigured()) return [];
+  return retry(async () => {
+    const recs = await base()('Leads')
+      .select({
+        filterByFormula: `AND({Status} = "New", {AssignedAgent} = "")`,
+        maxRecords: limit,
+        sort: [{ field: 'Score', direction: 'desc' }]
+      })
+      .all();
+    return recs.map(recordToLead);
+  });
+}
+
+export async function assignLeadsToAgent(leadsToAssign, agentName) {
+  if (!isConfigured() || !leadsToAssign || !leadsToAssign.length) return;
+  const chunks = [];
+  const chunkSize = 10;
+  for (let i = 0; i < leadsToAssign.length; i += chunkSize) {
+    chunks.push(leadsToAssign.slice(i, i + chunkSize));
+  }
+  for (const chunk of chunks) {
+    const records = chunk.map(l => ({
+      id: l._airtableId,
+      fields: {
+        Status: 'Assigned',
+        AssignedAgent: agentName
+      }
+    }));
+    await retry(() => base()('Leads').update(records));
+    await sleep(200);
+  }
+}
+
+export async function checkAndRefillAgentLeads(agentName) {
+  if (!isConfigured()) return 0;
+
+  // 1. Fetch all leads for this agent
+  const recs = await base()('Leads').select({
+    filterByFormula: `{AssignedAgent} = "${agentName}"`
+  }).all();
+  const leads = recs.map(recordToLead);
+
+  // 2. Count total assigned and total called this week (since Monday)
+  const monday = getMondayOfCurrentWeek();
+  const weekLeads = leads.filter(l => {
+    const date = l.calledAt ? new Date(l.calledAt) : new Date(l.createdAt || Date.now());
+    return date >= monday;
+  });
+
+  const assignedCount = weekLeads.length;
+  const calledCount = weekLeads.filter(l => ['Interested', 'NotInterested', 'Callback', 'NoAnswer'].includes(l.outcome)).length;
+
+  const riyashEmail = process.env.RIYASH_EMAIL || 'riyash@waveclosers.com';
+
+  // If agent finished their batch (assigned > 0, called equals assigned) before Friday cutoff
+  if (assignedCount > 0 && calledCount === assignedCount && isBeforeFriday()) {
+    console.log(`[refill] Agent ${agentName} finished weekly batch of ${assignedCount} leads. Refilling...`);
+
+    // Check unassigned pool
+    const unassignedRecs = await base()('Leads').select({
+      filterByFormula: `AND({Status} = "New", {AssignedAgent} = "")`,
+      sort: [{ field: 'Score', direction: 'desc' }]
+    }).all();
+    const unassignedLeads = unassignedRecs.map(recordToLead);
+
+    const availableCount = unassignedLeads.length;
+    const refillCount = Math.min(100, availableCount);
+
+    if (refillCount > 0) {
+      const leadsToAssign = unassignedLeads.slice(0, refillCount);
+      await assignLeadsToAgent(leadsToAssign, agentName);
+
+      // Send email to Riyash
+      await sendEmail({
+        to: riyashEmail,
+        subject: `Agent ${agentName} Refilled: ${refillCount} Extra Leads Assigned`,
+        text: `Hi Riyash,\n\nAgent "${agentName}" finished their weekly batch of ${assignedCount} leads before Friday.\n\nThe system has auto-assigned ${refillCount} extra leads from the unassigned pool.\n\nRemaining unassigned leads in pool: ${availableCount - refillCount}.\n\nBest,\nWave Closers Operations Console`
+      }).catch(err => console.error('[refill] Email notify failed:', err.message));
+
+      // Log to AutomationLog
+      await appendLog({
+        task: 'Auto-refill leads',
+        target: `${agentName} finished weekly batch — ${refillCount} extra leads assigned`,
+        status: 'sent'
+      }).catch(() => {});
+    }
+
+    // Check if remaining pool is low (< 100 after refill or < 100 initially)
+    const remainingInPool = availableCount - refillCount;
+    if (remainingInPool < 100) {
+      const warnMsg = `Lead pool running low — only ${remainingInPool} leads remaining. Please generate more from the Lead Generation module.`;
+      console.warn(`[refill] ⚠️ ${warnMsg}`);
+
+      // Email warning
+      await sendEmail({
+        to: riyashEmail,
+        subject: `⚠️ Lead Pool Running Low (${remainingInPool} remaining)`,
+        text: `Hi Riyash,\n\nWarning: The unassigned lead pool has dropped to ${remainingInPool} leads.\n\nPlease generate a new batch of leads from the Lead Generation module to ensure agents have enough leads.\n\nBest,\nWave Closers Operations Console`
+      }).catch(err => console.error('[refill] Warn email failed:', err.message));
+
+      // Log to AutomationLog with status = 'alert'
+      await appendLog({
+        task: 'Lead pool low alert',
+        target: warnMsg,
+        status: 'alert'
+      }).catch(() => {});
+    }
+
+    return refillCount;
+  }
+
+  // Also check general unassigned pool level on every call update if it drops below 500
+  const totalUnassignedRecs = await base()('Leads').select({
+    filterByFormula: `AND({Status} = "New", {AssignedAgent} = "")`,
+    fields: ['PlaceID']
+  }).all();
+  const totalUnassigned = totalUnassignedRecs.length;
+
+  if (totalUnassigned < 500) {
+    const recentLogs = await listLog(5).catch(() => []);
+    const alreadyAlerted = recentLogs.some(l => l.task === 'Lead pool low alert' && l.status === 'alert');
+
+    if (!alreadyAlerted) {
+      const warnMsg = `⚠ Only ${totalUnassigned} leads remaining in pool — generate more before Monday`;
+      
+      await sendEmail({
+        to: riyashEmail,
+        subject: `⚠️ Lead Pool Low Alert (${totalUnassigned} remaining)`,
+        text: `Hi Riyash,\n\nWarning: The unassigned lead pool has dropped to ${totalUnassigned} leads.\n\nPlease generate more leads before Monday.\n\nBest,\nWave Closers Operations Console`
+      }).catch(err => console.error('[refill] Pool low email failed:', err.message));
+
+      await appendLog({
+        task: 'Lead pool low alert',
+        target: warnMsg,
+        status: 'alert'
+      }).catch(() => {});
+    }
+  }
+
+  return 0;
+}
+
+

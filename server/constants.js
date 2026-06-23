@@ -33,7 +33,15 @@ export const EARNING_MODELS = {
 // ─── Module 6 — Lead generation constants ─────────────────────────────────────
 
 export const DAILY_LEADS_PER_AGENT = Number(process.env.DAILY_LEADS_PER_AGENT || 100);
+export const WEEKLY_LEADS_PER_AGENT = Number(process.env.WEEKLY_LEADS_PER_AGENT || 500);
+export const LEAD_GENERATION_MARKETS = process.env.LEAD_GENERATION_MARKETS || 'Miami FL,Houston TX,Atlanta GA,Chicago IL,Dallas TX';
 export const NUM_AGENTS            = Number(process.env.NUM_AGENTS || 10);
+
+export const AGENTS = Array.from({ length: NUM_AGENTS }, (_, i) => ({
+  id: `agent-${i + 1}`,
+  name: `Agent ${i + 1}`,
+  email: `agent${i + 1}@waveclosers.com`
+}));
 
 export const BUSINESS_TYPES = [
   'restaurant', 'beauty_salon', 'nail_salon', 'deli', 'massage', 'small_retail',
@@ -42,4 +50,5 @@ export const BUSINESS_TYPES = [
 export const LEAD_STATUSES = [
   'New', 'Assigned', 'Called', 'Interested', 'NotInterested', 'Callback', 'NoAnswer',
 ];
+
 

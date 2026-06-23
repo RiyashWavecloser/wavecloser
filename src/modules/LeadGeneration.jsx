@@ -287,6 +287,12 @@ export default function LeadGeneration({ users = [], setUsers, setLeadBadge }) {
         </div>
       )}
 
+      {summary.newLeads < 500 && (
+        <div style={S.warningBanner}>
+          ⚠️ Only {summary.newLeads} leads remaining in pool — generate more before Monday
+        </div>
+      )}
+
       {/* ── Stat cards ── */}
       <div className="wc-stat-grid" style={S.statGrid}>
         <StatCard label="Total leads"  value={summary.total}      sub="in system" />
@@ -840,6 +846,7 @@ const S = {
   statGrid:    { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 12 },
   twoCol:      { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 },
   demoBanner:  { background: 'var(--color-info-bg)', border: '1px solid var(--color-info)', borderRadius: 8, padding: '10px 16px', fontSize: 12, color: 'var(--color-info-text)', lineHeight: 1.6 },
+  warningBanner: { background: '#FFF3E0', color: '#E65100', padding: '12px 16px', borderRadius: 8, border: '1px solid #FFB74D', fontWeight: 'bold', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, lineHeight: 1.5 },
 
   tabRow:      { display: 'flex', gap: 4, borderBottom: '1px solid var(--color-line)', paddingBottom: 0 },
   tab:         { background: 'transparent', border: 'none', padding: '10px 16px', fontSize: 13, fontWeight: 500, color: '#888', cursor: 'pointer', borderBottom: '2px solid transparent', fontFamily: 'inherit', transition: 'all .15s' },

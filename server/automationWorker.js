@@ -25,6 +25,10 @@ import {
   listUsers,
   updateUser,
   appendLog,
+  getLeads,
+  getUnassignedLeads,
+  assignLeadsToAgent,
+  getMondayOfCurrentWeek,
 } from './airtableClient.js';
 import {
   sendEmail,
@@ -36,7 +40,8 @@ import {
   buildLearningEnrollmentEmail,
   buildTrainingInviteEmail,
 } from './emailService.js';
-import { BENCHMARKS } from './constants.js';
+import { BENCHMARKS, WEEKLY_LEADS_PER_AGENT, LEAD_GENERATION_MARKETS, NUM_AGENTS, AGENTS } from './constants.js';
+import { generateLeads } from './leadWorker.js';
 
 dotenv.config();
 
@@ -253,14 +258,204 @@ async function poll() {
   await runShortfallChecks(users).catch(console.error);
 }
 
+// ─── Weekly Lead Model Helpers ────────────────────────────────────────────────
+
+// Helper to generate synthetic demo leads when Airtable/APIs are in demo mode
+function generateManyDemoLeads(count, location = 'Nashville, TN') {
+  const types = ['restaurant', 'beauty_salon', 'nail_salon', 'deli', 'massage', 'small_retail'];
+  const names = ['Kitchen', 'Palace', 'Corner', 'Express', 'Studio', 'Lounge', 'Lab', 'Elite', 'Bar', 'Market', 'Touch', 'Gift Shop', 'Boutique'];
+  const prefixes = ['Luxe', 'Grand', 'Zen', 'Urban', 'Metro', 'Royal', 'Lively', 'Happy', 'Golden', 'Star', 'First', 'Next'];
+  
+  const leads = [];
+  for (let i = 1; i <= count; i++) {
+    const type = types[i % types.length];
+    const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+    const name = names[Math.floor(Math.random() * names.length)];
+    const bName = `${prefix} ${type.replace('_', ' ')} ${name}`;
+    leads.push({
+      placeId: `demo-gen-${i}-${Date.now()}`,
+      businessName: bName,
+      type,
+      address: `${100 + i} Main St, ${location}`,
+      phone: `(555) 555-${String(1000 + i).slice(-4)}`,
+      website: i % 3 === 0 ? `https://demo-${i}.com` : '',
+      rating: +(3.5 + Math.random() * 1.5).toFixed(1),
+      reviewCount: Math.floor(20 + Math.random() * 500),
+      score: Math.floor(40 + Math.random() * 55),
+      scoreReason: 'Demo lead — connect API keys for real scoring.',
+      status: 'New',
+      assignedAgent: '',
+      calledAt: null,
+      outcome: '',
+      market: location,
+    });
+  }
+  return leads;
+}
+
+// Friday 5pm Weekly Lead Performance Report
+async function generateWeeklyLeadReport() {
+  console.log('[worker] ⏰ Starting weekly lead performance report compilation...');
+  try {
+    const leads = await getLeads().catch(err => {
+      console.error('[worker] Failed fetching leads for report:', err.message);
+      return [];
+    });
+
+    const monday = getMondayOfCurrentWeek();
+    const weekLeads = leads.filter(l => {
+      const date = l.calledAt ? new Date(l.calledAt) : new Date(l.createdAt || Date.now());
+      return date >= monday;
+    });
+
+    const agentMap = {};
+    for (const agent of AGENTS) {
+      agentMap[agent.name] = {
+        name: agent.name,
+        assigned: 0,
+        called: 0,
+        interested: 0,
+        notInterested: 0,
+        callback: 0,
+        noAnswer: 0
+      };
+    }
+
+    for (const l of weekLeads) {
+      if (l.assignedAgent && agentMap[l.assignedAgent]) {
+        const a = agentMap[l.assignedAgent];
+        a.assigned++;
+        if (l.outcome && ['Interested', 'NotInterested', 'Callback', 'NoAnswer'].includes(l.outcome)) {
+          a.called++;
+          if (l.outcome === 'Interested')    a.interested++;
+          if (l.outcome === 'NotInterested') a.notInterested++;
+          if (l.outcome === 'Callback')      a.callback++;
+          if (l.outcome === 'NoAnswer')      a.noAnswer++;
+        }
+      }
+    }
+
+    const startStr = monday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const endStr = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+    let reportText = `Wave Closers — Weekly Agent Performance Report\n`;
+    reportText += `Week of ${startStr} - ${endStr}\n`;
+    reportText += `==============================================\n\n`;
+
+    for (const a of Object.values(agentMap)) {
+      const convRate = a.called > 0 ? ((a.interested / a.called) * 100).toFixed(1) : '0.0';
+      const remaining = a.assigned - a.called;
+
+      reportText += `Agent: ${a.name}\n`;
+      reportText += `─────────────────────────────\n`;
+      reportText += `Total assigned:    ${a.assigned}\n`;
+      reportText += `Called:            ${a.called}\n`;
+      reportText += `Interested:         ${a.interested}\n`;
+      reportText += `Not interested:    ${a.notInterested}\n`;
+      reportText += `Callback:           ${a.callback}\n`;
+      reportText += `No answer:          ${a.noAnswer}\n`;
+      reportText += `Conversion rate:  ${convRate}%\n`;
+      reportText += `─────────────────────────────\n`;
+      reportText += `Remaining to call: ${remaining}\n\n`;
+    }
+
+    const riyashEmail = process.env.RIYASH_EMAIL;
+    const williamEmail = process.env.WILLIAM_EMAIL;
+
+    if (riyashEmail || williamEmail) {
+      const recipients = [riyashEmail, williamEmail].filter(Boolean);
+      console.log(`[worker] Sending weekly performance report to: ${recipients.join(', ')}`);
+      await sendEmail({
+        to: recipients,
+        subject: `Wave Closers — Weekly Agent Performance Report (${startStr} - ${endStr})`,
+        text: reportText
+      });
+    } else {
+      console.warn('[worker] No recipient emails configured in env (RIYASH_EMAIL / WILLIAM_EMAIL). Logging report:\n', reportText);
+    }
+
+    await appendLog({
+      task: 'Weekly report sent',
+      target: `Report for ${Object.keys(agentMap).length} agents`,
+      status: 'sent'
+    }).catch(() => {});
+
+  } catch (err) {
+    console.error('[worker] Error compiling weekly report:', err.message);
+  }
+}
+
 // ─── Cron jobs ────────────────────────────────────────────────────────────────
 
 if (!TEST_MODE) {
-  // Weekly report — Monday 7am
+  // Onboarding Weekly Report — Monday 7am
   cron.schedule('0 7 * * 1', async () => {
-    console.log('[worker] ⏰ Cron: weekly report');
+    console.log('[worker] ⏰ Cron: onboarding weekly report');
     const users = airtableReady() ? await listUsers().catch(() => []) : [];
     await runWeeklyReport(users).catch(console.error);
+  });
+
+  // Weekly Batch Lead Generation — Monday 8am
+  cron.schedule('0 8 * * 1', async () => {
+    console.log('[worker] ⏰ Cron: Monday 8:00 AM weekly lead generation & assignment');
+    try {
+      const targetMarkets = (process.env.LEAD_GENERATION_MARKETS || 'Miami FL,Houston TX,Atlanta GA,Chicago IL,Dallas TX')
+        .split(',').map(m => m.trim()).filter(Boolean);
+      const allBusinessTypes = ['restaurant', 'beauty_salon', 'nail_salon', 'deli', 'massage', 'small_retail'];
+      const radius = 5;
+
+      let generatedPool = [];
+      if (airtableReady()) {
+        for (const market of targetMarkets) {
+          try {
+            console.log(`[worker] Generating leads for market: ${market}`);
+            const result = await generateLeads({ location: market, businessTypes: allBusinessTypes, radius });
+            if (result && result.leads) {
+              generatedPool.push(...result.leads);
+            }
+          } catch (err) {
+            console.error(`[worker] Failed generating leads for ${market}:`, err.message);
+          }
+        }
+        
+        // Fetch fresh unassigned leads from Airtable to get their Airtable record IDs (_airtableId)
+        generatedPool = await getUnassignedLeads(NUM_AGENTS * WEEKLY_LEADS_PER_AGENT);
+      } else {
+        // Demo mode: generate synthetic leads in memory
+        console.log('[worker] [demo] Generating synthetic weekly lead pool...');
+        generatedPool = generateManyDemoLeads(NUM_AGENTS * WEEKLY_LEADS_PER_AGENT);
+      }
+
+      console.log(`[worker] Total unassigned leads available: ${generatedPool.length}. Assigning to agents...`);
+      
+      // Assign WEEKLY_LEADS_PER_AGENT leads to each agent
+      for (let i = 0; i < AGENTS.length; i++) {
+        const agent = AGENTS[i];
+        const agentLeads = generatedPool.slice(i * WEEKLY_LEADS_PER_AGENT, (i + 1) * WEEKLY_LEADS_PER_AGENT);
+        
+        if (agentLeads.length > 0) {
+          if (airtableReady()) {
+            await assignLeadsToAgent(agentLeads, agent.name);
+          }
+          console.log(`[worker] Assigned ${agentLeads.length} leads to ${agent.name}`);
+        }
+      }
+
+      await appendLog({
+        task: 'Weekly leads assigned',
+        target: `${WEEKLY_LEADS_PER_AGENT} leads each → ${AGENTS.length} agents`,
+        status: 'sent'
+      }).catch(() => {});
+      
+      console.log('[worker] Weekly leads assignment complete.');
+    } catch (err) {
+      console.error('[worker] Weekly lead generation failed:', err.message);
+    }
+  });
+
+  // Weekly Lead Performance Report — Friday 5pm
+  cron.schedule('0 17 * * 5', async () => {
+    await generateWeeklyLeadReport().catch(console.error);
   });
 
   // Quota check — 9am daily, only acts on last day of month

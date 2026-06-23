@@ -43,6 +43,7 @@ import {
   qualifyLead,
   getQualificationCompleted,
   getLeadById,
+  checkAndRefillAgentLeads,
 } from './airtableClient.js';
 import { generateLeads } from './leadWorker.js';
 import {
@@ -528,6 +529,8 @@ async function handleLeadPatch(req, res) {
 
   try {
     let qualifierNotified = false;
+    let finalLead = null;
+
     if (status === 'Interested' || patch.outcome === 'Interested') {
       // 1. Update Leads table status to Interested (valid single-select option)
       const lead = await updateLeadStatus(id, {
@@ -535,11 +538,13 @@ async function handleLeadPatch(req, res) {
         status: 'Interested',
         outcome: 'Interested'
       });
+      finalLead = lead;
 
       // 2. Fetch full lead record from Leads table
       const fullLead = await getLeadById(id);
 
       if (fullLead) {
+        finalLead = fullLead;
         // 3. Create entry in LeadQualificationQueue
         await createQualificationEntry({
           leadPlaceId:  fullLead.placeId,
@@ -568,11 +573,19 @@ async function handleLeadPatch(req, res) {
 
       qualifierNotified = true;
       console.log(`[proxy] ✅ ${fullLead ? fullLead.businessName : id} → Interested → Qualifier notified`);
-      return res.json({ demo: false, lead: lead || fullLead, qualifierNotified });
+    } else {
+      finalLead = await updateLeadStatus(id, leadSafePatch);
     }
 
-    const updated = await updateLeadStatus(id, leadSafePatch);
-    res.json({ demo: false, lead: updated, qualifierNotified });
+    // Auto-refill agent leads check (weekly batch model)
+    const effectiveAgent = agentName || finalLead?.assignedAgent || '';
+    if (effectiveAgent) {
+      checkAndRefillAgentLeads(effectiveAgent).catch(err => {
+        console.error(`[refill] Auto-refill check failed for ${effectiveAgent}:`, err.message);
+      });
+    }
+
+    res.json({ demo: false, lead: finalLead, qualifierNotified });
   } catch (err) {
     console.error(`[proxy] PATCH /api/leads/${id} error:`, err.message);
     res.status(500).json({ error: err.message });
