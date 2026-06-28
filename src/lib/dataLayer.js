@@ -254,9 +254,9 @@ export async function fetchLeadsFromAPI(filters = {}) {
 /**
  * Trigger lead generation. Returns { leads, stats, demo }.
  */
-export async function generateLeadsAPI(location, businessTypes, radius) {
+export async function generateLeadsAPI(location, businessTypes, radius, maxLeads = 50) {
   try {
-    return await post('/api/leads/generate', { location, businessTypes, radius });
+    return await post('/api/leads/generate', { location, businessTypes, radius, maxLeads });
   } catch {
     return { leads: [], stats: {}, demo: true, error: 'Backend offline' };
   }
@@ -306,6 +306,34 @@ export async function fetchLeadStatsAPI() {
 export async function fetchMyLeadsAPI() {
   try {
     const data = await get('/api/leads/my-leads');
+    if (data.demo) return null;
+    return data.leads;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Agent self-service lead generation.
+ * Leads are auto-assigned to the requesting agent and globally deduplicated.
+ * Returns { leads, stats, demo }.
+ */
+export async function generateMyOwnLeads(location, businessTypes, radius, maxLeads = 50) {
+  try {
+    return await post('/api/leads/generate-self', { location, businessTypes, radius, maxLeads });
+  } catch (e) {
+    return { demo: true, error: e.message, leads: [] };
+  }
+}
+
+/**
+ * Supervisor view — fetch all agents' leads (optionally filtered by agent name).
+ * Only accessible to agent_supervisor role.
+ */
+export async function fetchAllAgentLeadsAPI(agentName = null) {
+  try {
+    const qs = agentName ? `?agent=${encodeURIComponent(agentName)}` : '';
+    const data = await get(`/api/leads/all-agents${qs}`);
     if (data.demo) return null;
     return data.leads;
   } catch {

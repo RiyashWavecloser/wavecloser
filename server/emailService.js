@@ -25,7 +25,9 @@ const FROM          = process.env.EMAIL_FROM            || 'riyashpatel3@gmail.c
 const RIYASH_EMAIL  = process.env.RIYASH_EMAIL          || 'riyashpatel3@gmail.com';
 const WILLIAM_EMAIL = process.env.WILLIAM_EMAIL         || 'william@waveclosers.com';
 const QUALIFIER_EMAIL = process.env.QUALIFIER_EMAIL     || 'qualifier@waveclosers.com';
-const RECRUITER_EMAIL = process.env.RECRUITER_EMAIL     || 'recruiter@waveclosers.com';
+// ⚠️ PLACEHOLDER — Aureliab's real email is TBC from William.
+// Update RECRUITER_EMAIL in .env once confirmed — no code changes needed.
+const RECRUITER_EMAIL = process.env.RECRUITER_EMAIL     || 'aureliab@waveclosers.com';
 
 // ─── Pending placeholder values ───────────────────────────────────────────────
 const CONTRACT_URL    = process.env.CONTRACT_TEMPLATE_URL  || 'https://waveclosers.com/contract (PENDING)';

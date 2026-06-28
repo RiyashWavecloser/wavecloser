@@ -35,13 +35,27 @@ export const EARNING_MODELS = {
 export const DAILY_LEADS_PER_AGENT = Number(process.env.DAILY_LEADS_PER_AGENT || 100);
 export const WEEKLY_LEADS_PER_AGENT = Number(process.env.WEEKLY_LEADS_PER_AGENT || 500);
 export const LEAD_GENERATION_MARKETS = process.env.LEAD_GENERATION_MARKETS || 'Miami FL,Houston TX,Atlanta GA,Chicago IL,Dallas TX';
-export const NUM_AGENTS            = Number(process.env.NUM_AGENTS || 10);
+export const NUM_AGENTS            = Number(process.env.NUM_AGENTS || 9);
 
-export const AGENTS = Array.from({ length: NUM_AGENTS }, (_, i) => ({
-  id: `agent-${i + 1}`,
-  name: `Agent ${i + 1}`,
-  email: `agent${i + 1}@waveclosers.com`
-}));
+/**
+ * Real cold-calling agent accounts (confirmed June 2026).
+ * Janina is an agent — NOT recruiter (corrected from earlier placeholder).
+ * Aureliab is the Recruiter / Franchise Sales person (separate staff account).
+ */
+export const AGENTS = [
+  { id: 'agent-janina',   name: 'Janina',             email: 'janina@waveclosers.com'   },
+  { id: 'agent-johnm',    name: 'John Mell Morillo',  email: 'johnm@waveclosers.com'    },
+  { id: 'agent-giana',    name: 'Gian Ericka Arcega', email: 'giana@waveclosers.com'    },
+  { id: 'agent-juliusb',  name: 'Julius Bacarra',     email: 'juliusb@waveclosers.com'  },
+  { id: 'agent-karenm',   name: 'Karen Monito',       email: 'karenm@waveclosers.com'   },
+  { id: 'agent-jemelyna', name: 'Jemelyn Andaya',     email: 'jemelyna@waveclosers.com' },
+  { id: 'agent-manilynp', name: 'Manilyn Parabas',    email: 'manilynp@waveclosers.com' },
+  { id: 'agent-melaniea', name: 'Melanie Aranton',    email: 'melaniea@waveclosers.com' },
+  { id: 'agent-aprils',   name: 'April Joy Saguid',   email: 'aprils@waveclosers.com'   },
+];
+
+// Supervisor — sees all agents' leads
+export const AGENT_SUPERVISOR_EMAIL = process.env.AGENT_SUPERVISOR_EMAIL || 'agentsservices@waveclosers.com';
 
 export const BUSINESS_TYPES = [
   'restaurant', 'beauty_salon', 'nail_salon', 'deli', 'massage', 'small_retail',

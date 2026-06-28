@@ -70,9 +70,9 @@ export const ONBOARDING_STAGES = [
 export const TEAM = [
   { role: 'Lead Generation / Executive Sponsor',       owner: 'William',  color: '#D44A4A' },
   { role: 'Project Manager (PM + Ops + AI)',            owner: 'Riyash',   color: '#5B8DEF' },
-  { role: 'Appointment Setter / Qualifier',             owner: 'Lead Qualifier',  color: '#7B6FDB' },
-  { role: 'Recruiter / Franchise Sales',                owner: 'Recruiter',   color: '#D97A5E' },
-  { role: 'Customer Experience Team',                   owner: 'CX Team',  color: '#7B6FDB' },
+  { role: 'Appointment Setter / Qualifier',             owner: 'Mildred',  color: '#7B6FDB' },
+  { role: 'Recruiter / Franchise Sales',                owner: 'Aureliab', color: '#D97A5E' }, // ⚠️ Open item #11 — email TBC from William
+  { role: 'Customer Experience Team',                   owner: 'Mildred',  color: '#7B6FDB' },
   { role: 'Marketer',                                   owner: 'Sergey',   color: '#2D9B5E' },
   { role: 'Sales Trainer',                              owner: 'Matt',     color: '#D49A2B' },
   { role: 'Sales Manager (Step 6)',                     owner: 'TBC',      color: '#999999' },
@@ -90,17 +90,20 @@ export const STATUS_COLORS = {
  * Open items (scope §12) — update when William confirms each.
  */
 export const OPEN_ITEMS = [
-  { id:1, item:'API availability from waveclosers.com',         blocks:'API sync mode',            status:'pending' },
-  { id:2, item:'Weekly lead targets per user type',            blocks:'Lead-shortfall alerts',    status:'pending' },
-  { id:3, item:'Monthly quota benchmarks per user type',       blocks:'Quota-miss escalations',   status:'pending' },
-  { id:4, item:'Contract template for CX automation',         blocks:'Contract dispatch email',   status:'pending' },
-  { id:5, item:'Online learning platform link / login flow',  blocks:'Online learning enrollment',status:'pending' },
-  { id:6, item:'Thursday sales training meeting time',        blocks:'Thursday training invite',  status:'pending' },
-  { id:7, item:'Sales Manager role (TBC)',                    blocks:'Step 6 ownership',          status:'pending' },
-  { id:8, item:'Google Places API key',                        blocks:'Live lead generation',     status:'pending' },
-  { id:9, item:'Yelp Fusion API key',                          blocks:'Backup lead source',       status:'configured' },
-  { id:10,item:'Cold-calling agent roster (10 names)',         blocks:'Agent assignment',          status:'pending' },
-  { id: 11,item:'Qualifier CX workflow confirmation',            blocks:'Auto-routing rules',        status:'confirmed' },
+  { id:1,  item:'API availability from waveclosers.com',         blocks:'API sync mode',            status:'pending' },
+  { id:2,  item:'Weekly lead targets per user type',            blocks:'Lead-shortfall alerts',    status:'pending' },
+  { id:3,  item:'Monthly quota benchmarks per user type',       blocks:'Quota-miss escalations',   status:'pending' },
+  { id:4,  item:'Contract template for CX automation',         blocks:'Contract dispatch email',   status:'pending' },
+  { id:5,  item:'Online learning platform link / login flow',  blocks:'Online learning enrollment',status:'pending' },
+  { id:6,  item:'Thursday sales training meeting time',        blocks:'Thursday training invite',  status:'pending' },
+  { id:7,  item:'Sales Manager role (TBC)',                    blocks:'Step 6 ownership',          status:'pending' },
+  { id:8,  item:'Google Places API key',                        blocks:'Live lead generation',     status:'pending' },
+  { id:9,  item:'Yelp Fusion API key',                          blocks:'Backup lead source',       status:'configured' },
+  { id:10, item:'Cold-calling agent roster (10 names)',         blocks:'Agent assignment',          status:'resolved' },
+  { id:11, item:'Qualifier CX workflow confirmation',            blocks:'Auto-routing rules',        status:'confirmed' },
+  // ⚠️ OPEN ITEM #11 — Confirm Aureliab's exact email address — currently using placeholder (aureliab@waveclosers.com)
+  // Update RECRUITER_EMAIL in .env once confirmed — no code changes needed.
+  { id:12, item:"Aureliab's exact email address (Recruiter/Franchise Sales)", blocks:'Recruiter email routing', status:'pending' },
 ];
 
 /**
@@ -116,24 +119,27 @@ export const BUSINESS_TYPES = [
 ];
 
 /**
- * Placeholder cold-calling agents — update when William confirms real names.
- * Edit this array when open item #10 is resolved.
+ * Real cold-calling agent accounts (confirmed June 2026).
+ * Janina is an agent — NOT recruiter (corrected from earlier placeholder).
+ * Aureliab is the Recruiter / Franchise Sales person (separate staff account).
  */
 export const AGENTS = [
-  { id: 'agent-1',  name: 'Agent 1',  email: 'agent1@waveclosers.com' },
-  { id: 'agent-2',  name: 'Agent 2',  email: 'agent2@waveclosers.com' },
-  { id: 'agent-3',  name: 'Agent 3',  email: 'agent3@waveclosers.com' },
-  { id: 'agent-4',  name: 'Agent 4',  email: 'agent4@waveclosers.com' },
-  { id: 'agent-5',  name: 'Agent 5',  email: 'agent5@waveclosers.com' },
-  { id: 'agent-6',  name: 'Agent 6',  email: 'agent6@waveclosers.com' },
-  { id: 'agent-7',  name: 'Agent 7',  email: 'agent7@waveclosers.com' },
-  { id: 'agent-8',  name: 'Agent 8',  email: 'agent8@waveclosers.com' },
-  { id: 'agent-9',  name: 'Agent 9',  email: 'agent9@waveclosers.com' },
-  { id: 'agent-10', name: 'Agent 10', email: 'agent10@waveclosers.com' },
+  { id: 'agent-janina',   name: 'Janina',             email: 'janina@waveclosers.com'   },
+  { id: 'agent-johnm',    name: 'John Mell Morillo',  email: 'johnm@waveclosers.com'    },
+  { id: 'agent-giana',    name: 'Gian Ericka Arcega', email: 'giana@waveclosers.com'    },
+  { id: 'agent-juliusb',  name: 'Julius Bacarra',     email: 'juliusb@waveclosers.com'  },
+  { id: 'agent-karenm',   name: 'Karen Monito',       email: 'karenm@waveclosers.com'   },
+  { id: 'agent-jemelyna', name: 'Jemelyn Andaya',     email: 'jemelyna@waveclosers.com' },
+  { id: 'agent-manilynp', name: 'Manilyn Parabas',    email: 'manilynp@waveclosers.com' },
+  { id: 'agent-melaniea', name: 'Melanie Aranton',    email: 'melaniea@waveclosers.com' },
+  { id: 'agent-aprils',   name: 'April Joy Saguid',   email: 'aprils@waveclosers.com'   },
 ];
 
+// Supervisor account — sees all 9 agents' leads via dropdown
+export const AGENT_SUPERVISOR_EMAIL = 'agentsservices@waveclosers.com';
+
 export const DAILY_LEADS_PER_AGENT = 100;
-export const NUM_AGENTS = 10;
+export const NUM_AGENTS = 9;
 
 export const LEAD_STATUSES = {
   NEW:                { id: 'New',                label: 'New',                 color: 'var(--color-info)' },

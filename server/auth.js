@@ -126,3 +126,16 @@ export function requireRole(...allowed) {
   };
 }
 
+/**
+ * Middleware: require role = 'agent' (cold-calling agents only).
+ */
+export function authenticateAgent(req, res, next) {
+  requireAuth(req, res, () => requireRole('agent')(req, res, next));
+}
+
+/**
+ * Middleware: require role = 'agent_supervisor'.
+ */
+export function authenticateSupervisor(req, res, next) {
+  requireAuth(req, res, () => requireRole('agent_supervisor')(req, res, next));
+}

@@ -244,6 +244,7 @@ function recordToLead(r) {
     agentNotes:         r.get('AgentNotes')          || '',
     market:             r.get('Market')              || '',
     createdAt:          r.get('CreatedAt')           || '',
+    generatedBy:        r.get('GeneratedBy')         || '',
     // Partner assignment fields
     assignedPartnerID:  r.get('AssignedPartnerID')   || '',
     assignedPartnerAt:  r.get('AssignedPartnerAt')   || null,
@@ -279,6 +280,7 @@ function leadToFields(l) {
   if (l.agentNotes         !== undefined) f['AgentNotes']         = l.agentNotes;
   if (l.market             !== undefined) f['Market']             = l.market;
   if (l.createdAt          !== undefined) f['CreatedAt']          = l.createdAt;
+  if (l.generatedBy        !== undefined) f['GeneratedBy']        = l.generatedBy;
   if (l.assignedPartnerID  !== undefined) f['AssignedPartnerID']  = l.assignedPartnerID;
   if (l.assignedPartnerAt  !== undefined) f['AssignedPartnerAt']  = l.assignedPartnerAt;
   if (l.qualifierNotifiedAt !== undefined) f['QualifierNotifiedAt'] = l.qualifierNotifiedAt;
@@ -337,6 +339,56 @@ export async function getExistingPlaceIds() {
   return retry(async () => {
     const recs = await base()('Leads').select({ fields: ['PlaceID'] }).all();
     return new Set(recs.map(r => r.get('PlaceID')).filter(Boolean));
+  });
+}
+
+/**
+ * Normalize a phone number to digits only (last 10).
+ * Used for global deduplication across both PlaceID and Phone.
+ */
+export function normalizePhone(phone) {
+  if (!phone) return '';
+  return phone.replace(/\D/g, '').slice(-10);
+}
+
+/**
+ * GLOBAL deduplication set — fetches ALL PlaceIDs and Phones from the Leads table.
+ * Returns a Set with entries like `pid:ChIJxxxxx` and `phone:2125551234`.
+ *
+ * ⚠️ IMPORTANT: This must be checked BEFORE any lead generation call.
+ * No business should EVER appear as a lead twice, for any agent, at any time.
+ *
+ * Requires Airtable Leads table to have PlaceID and Phone fields populated.
+ * Prereq: Riyash must manually add GeneratedBy (Single line text) to Leads table in Airtable UI.
+ */
+export async function getGlobalDeduplicationSet() {
+  if (!isConfigured()) return new Set(); // demo mode — no dedup
+  return retry(async () => {
+    const recs = await base()('Leads').select({ fields: ['PlaceID', 'Phone'] }).all();
+    const dedupeSet = new Set();
+    for (const r of recs) {
+      const placeId = r.get('PlaceID');
+      const phone   = r.get('Phone');
+      if (placeId) dedupeSet.add(`pid:${placeId}`);
+      if (phone)   dedupeSet.add(`phone:${normalizePhone(phone)}`);
+    }
+    return dedupeSet;
+  });
+}
+
+/**
+ * Get ALL leads across all agents — for supervisor view.
+ * Only accessible to agent_supervisor role.
+ */
+export async function getAllAgentLeads() {
+  return retry(async () => {
+    const recs = await base()('Leads')
+      .select({
+        filterByFormula: `{AssignedAgent} != ""`,
+        sort: [{ field: 'Score', direction: 'desc' }],
+      })
+      .all();
+    return recs.map(recordToLead);
   });
 }
 

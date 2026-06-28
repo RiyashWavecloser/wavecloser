@@ -36,6 +36,7 @@ import {
   updateLeadStatus,
   getLeadStats,
   getLeadsByAgent,
+  getAllAgentLeads,
   getQualificationQueue,
   assignLeadToPartner,
   createQualificationEntry,
@@ -53,7 +54,8 @@ import {
   buildQualifierLeadEmail,
   buildPartnerLeadEmail,
 } from './emailService.js';
-import { requireAuth, signToken, verifyPassword, hashPassword, requireRole } from './auth.js';
+import { requireAuth, signToken, verifyPassword, hashPassword, requireRole, authenticateAgent, authenticateSupervisor } from './auth.js';
+import { AGENTS } from './constants.js';
 
 dotenv.config();
 
@@ -467,13 +469,19 @@ app.get('/api/leads', async (req, res) => {
 });
 
 app.post('/api/leads/generate', async (req, res) => {
-  const { location, businessTypes, radius } = req.body || {};
+  const { location, businessTypes, radius, maxLeads } = req.body || {};
   if (!location || !businessTypes?.length) {
     return res.status(400).json({ error: 'location and businessTypes[] are required' });
   }
+  const cappedMax = Math.min(500, Math.max(1, parseInt(maxLeads) || 50));
   try {
-    console.log(`[proxy] POST /api/leads/generate → ${location} (${businessTypes.join(', ')})`);
-    const result = await generateLeads({ location, businessTypes, radius: radius || 5 });
+    console.log(`[proxy] POST /api/leads/generate → ${location} (${businessTypes.join(', ')}) (requested maxLeads: ${cappedMax})`);
+    const result = await generateLeads({
+      location,
+      businessTypes,
+      radius: radius || 5,
+      maxLeads: cappedMax
+    });
     res.json(result);
   } catch (err) {
     console.error('[proxy] POST /api/leads/generate:', err.message);
@@ -516,11 +524,11 @@ async function handleLeadPatch(req, res) {
   // Strip fields that don't exist in the Leads Airtable table.
   // Only these fields exist: Status, AssignedAgent, CalledAt, Outcome,
   // Address, Type, Phone, Website, Rating, ReviewCount, Score, ScoreReason,
-  // BusinessName, PlaceID, Market, CreatedAt
+  // BusinessName, PlaceID, Market, CreatedAt, GeneratedBy
   const LEADS_SAFE_FIELDS = new Set([
     'status', 'assignedAgent', 'calledAt', 'outcome',
     'address', 'type', 'phone', 'website', 'rating', 'reviewCount',
-    'score', 'scoreReason', 'businessName', 'placeId', 'market', 'createdAt',
+    'score', 'scoreReason', 'businessName', 'placeId', 'market', 'createdAt', 'generatedBy',
   ]);
   const leadSafePatch = {};
   for (const [key, val] of Object.entries(patch)) {
@@ -620,6 +628,70 @@ app.get('/api/leads/my-leads', requireAuth, async (req, res) => {
     res.json({ demo: false, leads });
   } catch (err) {
     console.error(`[proxy] GET /api/leads/my-leads (${agentName}):`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Agent Self-Service Lead Generation ──────────────────────────────────────
+
+/**
+ * POST /api/leads/generate-self
+ * Agent generates their own leads — auto-assigned to themselves.
+ * Requires: role = 'agent'
+ */
+app.post('/api/leads/generate-self', authenticateAgent, async (req, res) => {
+  const { location, businessTypes, radius, maxLeads } = req.body || {};
+  if (!location || !businessTypes?.length) {
+    return res.status(400).json({ error: 'location and businessTypes[] are required' });
+  }
+  // Server-side cap — never trust the client blindly
+  const cappedMax = Math.min(500, Math.max(1, parseInt(maxLeads) || 50));
+  const agentEmail = req.user.email;
+  const agentName  = AGENTS.find(a => a.email === agentEmail)?.name || req.user.name || agentEmail;
+
+  try {
+    console.log(`[proxy] POST /api/leads/generate-self → ${agentName} requesting ${cappedMax} leads in ${location}`);
+    const result = await generateLeads({
+      location,
+      businessTypes,
+      radius:           radius || 5,
+      requestedByAgent: agentName,
+      maxLeads:         cappedMax,
+    });
+    await appendLog({
+      task:   'Agent self-generated leads',
+      target: `${agentName} → ${result.leads.length} new leads in ${location} (requested ${cappedMax}, ${result.stats?.duplicatesFiltered || 0} dupes filtered)`,
+      status: 'sent',
+    }).catch(() => {});
+    res.json({ ...result, agentName });
+  } catch (err) {
+    console.error('[proxy] POST /api/leads/generate-self:', err.message);
+    res.status(500).json({ error: err.message, demo: true });
+  }
+});
+
+// ─── Supervisor: All Agents' Leads ───────────────────────────────────────────
+
+/**
+ * GET /api/leads/all-agents
+ * Supervisor sees all agents' leads with optional ?agent= filter.
+ * Requires: role = 'agent_supervisor'
+ */
+app.get('/api/leads/all-agents', authenticateSupervisor, async (req, res) => {
+  if (!airtableReady()) {
+    return res.json({ demo: true, leads: [] });
+  }
+  try {
+    const agentFilter = req.query.agent || null;
+    let leads;
+    if (agentFilter) {
+      leads = await getLeadsByAgent(agentFilter);
+    } else {
+      leads = await getAllAgentLeads();
+    }
+    res.json({ demo: false, leads });
+  } catch (err) {
+    console.error('[proxy] GET /api/leads/all-agents:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -733,6 +805,16 @@ app.listen(PORT, () => {
   console.log(`  Claude:   ${ANTHROPIC_KEY ? '✓ ready' : '✗ no key'}`);
   console.log(`  Airtable: ${airtableReady() ? '✓ connected' : '✗ not configured'}`);
   console.log(`  Email:    ${emailReady() ? '✓ Resend ready' : '✗ demo mode (console)'}`);
+  console.log();
+
+  // Debug: list all registered API routes
+  console.log('[proxy] Registered routes:');
+  app._router.stack.forEach(r => {
+    if (r.route) {
+      const methods = Object.keys(r.route.methods).join(',').toUpperCase();
+      console.log(`  ${methods.padEnd(6)} ${r.route.path}`);
+    }
+  });
   console.log();
 
   // Spawns the automation worker process alongside the Express server in cloud deployments

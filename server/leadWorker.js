@@ -30,7 +30,8 @@ import dotenv from 'dotenv';
 import {
   isConfigured as airtableReady,
   upsertLead,
-  getExistingPlaceIds,
+  getGlobalDeduplicationSet,
+  normalizePhone,
 } from './airtableClient.js';
 
 dotenv.config();
@@ -44,10 +45,7 @@ const TEST_MODE   = process.argv.includes('--test-mode');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function normalizePhone(phone) {
-  if (!phone) return '';
-  return phone.replace(/\D/g, '').slice(-10);
-}
+// normalizePhone is imported from airtableClient — do NOT redefine here
 
 // ─── Google Places API ────────────────────────────────────────────────────────
 
@@ -318,33 +316,45 @@ async function scoreLeads(leads) {
 /**
  * Generate scored leads for a given location and business types.
  *
- * @param {{ location: string, businessTypes: string[], radius?: number }} opts
- * @returns {Promise<{ leads: object[], stats: { google: number, yelp: number, merged: number, scored: number, saved: number } }>}
+ * @param {{ location: string, businessTypes: string[], radius?: number, requestedByAgent?: string|null, maxLeads?: number }} opts
+ *   requestedByAgent — if set, leads are auto-assigned to this agent name and marked GeneratedBy them.
+ *                       If null/undefined, leads go to the unassigned pool (status: 'New').
+ *   maxLeads — maximum number of fresh leads to score and save (server-side cap applied upstream, default 50).
+ * @returns {Promise<{ leads: object[], stats: object, demo: boolean }>}
  */
-export async function generateLeads({ location, businessTypes, radius = 5 }) {
-  const isDemo = !GOOGLE_KEY && !YELP_KEY;
-  console.log(`\n[leads] ─── Generate Leads ───`);
-  console.log(`  Location: ${location}`);
-  console.log(`  Types: ${businessTypes.join(', ')}`);
-  console.log(`  Radius: ${radius} miles`);
-  console.log(`  Mode: ${isDemo ? 'DEMO (no API keys)' : 'LIVE'}`);
+export async function generateLeads({ location, businessTypes, radius = 5, requestedByAgent = null, maxLeads = 50 }) {
+  // If no API keys at all, return seed data immediately
+  const hasGoogle = !!GOOGLE_KEY;
+  const hasYelp   = !!YELP_KEY;
+  const isDemo    = !hasGoogle && !hasYelp;
 
-  // If no API keys, return seed data
+  console.log(`\n[leads] ─── Generate Leads ───`);
+  console.log(`  Location:  ${location}`);
+  console.log(`  Types:     ${businessTypes.join(', ')}`);
+  console.log(`  Radius:    ${radius} miles`);
+  console.log(`  Max leads: ${maxLeads}`);
+  console.log(`  Requested by: ${requestedByAgent || 'Riyash (batch)'}`);
+  console.log(`  Google Places: ${hasGoogle ? '✓ active (primary source)' : '✗ no key — skipping'}`);
+  console.log(`  Yelp Fusion:   ${hasYelp   ? '✓ active (backup source)'  : '✗ no key — skipping'}`);
+
   if (isDemo) {
-    console.log('  [leads] No API keys configured — returning demo data');
+    console.log('  [leads] ⚠ No API keys — returning demo data (not saved to Airtable)');
     const { SEED_LEADS } = await import('../src/data/seed.js').catch(() => ({ SEED_LEADS: [] }));
-    // If we can't import seed (because of ESM path issues in prod), generate synthetic data
     const demoLeads = SEED_LEADS?.length ? SEED_LEADS : generateDemoLeads(location, businessTypes);
+    const filtered  = demoLeads.filter(l => businessTypes.includes(l.type)).sort((a, b) => b.score - a.score);
     return {
-      leads: demoLeads.filter(l => businessTypes.includes(l.type)).sort((a, b) => b.score - a.score),
-      stats: { google: 0, yelp: 0, merged: demoLeads.length, scored: demoLeads.length, saved: 0 },
+      leads: filtered.slice(0, maxLeads),
+      stats: { google: 0, yelp: 0, merged: filtered.length, fresh: filtered.length, scored: Math.min(filtered.length, maxLeads), saved: 0, duplicatesFiltered: 0 },
       demo: true,
     };
   }
 
-  // Step 1 & 2: Fetch from Google Places + Yelp for each business type
+  // STEP 1 — ALWAYS fetch global dedup set FIRST (before any API calls)
+  const globalDedupeSet = await getGlobalDeduplicationSet();
+  console.log(`  [leads] Global dedup set: ${globalDedupeSet.size} entries (PlaceID + Phone)`);
+
   let allGoogle = [];
-  let allYelp = [];
+  let allYelp   = [];
 
   const typeLabels = {
     restaurant: 'restaurant',
@@ -355,51 +365,77 @@ export async function generateLeads({ location, businessTypes, radius = 5 }) {
     small_retail: 'retail store',
   };
 
-  for (const type of businessTypes) {
-    const label = typeLabels[type] || type;
-    const google = await searchGooglePlaces(label, location, radius);
-    allGoogle.push(...google.map(r => ({ ...r, type })));
-    await sleep(1000); // Rate limit
-
-    const yelp = await searchYelp(type, location);
-    allYelp.push(...yelp.map(r => ({ ...r, type })));
-    await sleep(500);
-  }
-
-  // Step 2b: Fetch phone numbers from Google Place Details
-  for (const lead of allGoogle) {
-    if (!lead.phone && lead.placeId) {
-      const details = await getPlaceDetails(lead.placeId);
-      lead.phone = details.phone || '';
-      lead.website = details.website || '';
-      await sleep(200); // Rate limit
+  // STEP 2 — PRIMARY SOURCE: Google Places
+  if (hasGoogle) {
+    console.log('  [leads] Searching Google Places (primary source)...');
+    for (const type of businessTypes) {
+      const label = typeLabels[type] || type;
+      const google = await searchGooglePlaces(label, location, radius);
+      allGoogle.push(...google.map(r => ({ ...r, type })));
+      await sleep(1000); // Google requires 1s between requests
     }
+    // Fetch phone + website from Google Place Details for all Google results
+    for (const lead of allGoogle) {
+      if (!lead.phone && lead.placeId) {
+        const details = await getPlaceDetails(lead.placeId);
+        lead.phone   = details.phone   || '';
+        lead.website = details.website || '';
+        await sleep(200);
+      }
+    }
+    console.log(`  [leads] Google Places: ${allGoogle.length} total results`);
+  } else {
+    console.log('  [leads] ⚠ GOOGLE_PLACES_API_KEY not set — skipping primary source');
   }
 
-  // Step 3: Merge + deduplicate
-  const merged = mergeAndDeduplicate(allGoogle, allYelp);
-  console.log(`  [leads] Merged: ${merged.length} unique businesses (${allGoogle.length} Google + ${allYelp.length} Yelp)`);
+  // STEP 3 — BACKUP SOURCE: Yelp (supplements Google, fills gaps)
+  if (hasYelp) {
+    console.log('  [leads] Searching Yelp (backup source)...');
+    for (const type of businessTypes) {
+      const yelp = await searchYelp(type, location);
+      allYelp.push(...yelp.map(r => ({ ...r, type })));
+      await sleep(500);
+    }
+    console.log(`  [leads] Yelp: ${allYelp.length} total results`);
+  } else {
+    console.log('  [leads] ⚠ YELP_API_KEY not set — skipping backup source');
+  }
 
-  // Step 4: Claude lead scoring
-  const scored = await scoreLeads(merged);
+  // STEP 4 — Merge + deduplicate Google/Yelp sources (Google data wins on overlap)
+  const merged = mergeAndDeduplicate(allGoogle, allYelp);
+  console.log(`  [leads] Merged: ${merged.length} unique businesses (Google: ${allGoogle.length}, Yelp: ${allYelp.length})`);
+
+  // STEP 5 — Filter against global dedup set (PlaceID + Phone)
+  const freshLeads = merged.filter(lead => {
+    const pidKey   = `pid:${lead.placeId}`;
+    const phoneKey = `phone:${normalizePhone(lead.phone)}`;
+    const isDupe   = globalDedupeSet.has(pidKey) || (lead.phone && globalDedupeSet.has(phoneKey));
+    return !isDupe;
+  });
+  const duplicatesFiltered = merged.length - freshLeads.length;
+  console.log(`  [leads] ${merged.length} found → ${freshLeads.length} NEW (${duplicatesFiltered} global dupes filtered)`);
+
+  // STEP 6 — Cap to maxLeads BEFORE scoring (saves Claude API cost)
+  const leadsToScore = freshLeads.slice(0, maxLeads);
+  console.log(`  [leads] Capped to ${leadsToScore.length} of ${freshLeads.length} available fresh leads (maxLeads=${maxLeads})`);
+
+  // STEP 7 — Score the capped batch
+  const scored = await scoreLeads(leadsToScore);
   scored.sort((a, b) => b.score - a.score);
 
-  // Step 5: Deduplicate against existing Airtable leads
+  // STEP 8 — Save to Airtable with generatedBy and optional agent assignment
   let saved = 0;
   if (airtableReady()) {
     try {
-      const existingIds = await getExistingPlaceIds();
-      const newLeads = scored.filter(l => !existingIds.has(l.placeId));
-      console.log(`  [leads] New leads (not in Airtable): ${newLeads.length} of ${scored.length}`);
-
-      // Step 6: Save to Airtable
-      for (const lead of newLeads) {
+      for (const lead of scored) {
         try {
           await upsertLead({
             ...lead,
-            status: 'New',
-            market: location,
-            createdAt: new Date().toISOString(),
+            status:        requestedByAgent ? 'Assigned' : 'New',
+            assignedAgent: requestedByAgent || '',
+            market:        location,
+            generatedBy:   requestedByAgent || 'Riyash',
+            createdAt:     new Date().toISOString(),
           });
           saved++;
         } catch (err) {
@@ -408,17 +444,17 @@ export async function generateLeads({ location, businessTypes, radius = 5 }) {
         await sleep(200); // Airtable rate limit
       }
     } catch (err) {
-      console.error(`  [leads] Airtable dedup error: ${err.message}`);
+      console.error(`  [leads] Airtable save error: ${err.message}`);
     }
   } else {
     console.log('  [leads] Airtable not configured — leads not persisted');
   }
 
-  console.log(`  [leads] ✓ Complete: ${scored.length} scored, ${saved} saved to Airtable`);
+  console.log(`  [leads] ✓ Done: ${scored.length} scored, ${saved} saved (${requestedByAgent ? `assigned to ${requestedByAgent}` : 'unassigned pool'})`);
 
   return {
     leads: scored,
-    stats: { google: allGoogle.length, yelp: allYelp.length, merged: merged.length, scored: scored.length, saved },
+    stats: { google: allGoogle.length, yelp: allYelp.length, merged: merged.length, fresh: freshLeads.length, capped: leadsToScore.length, scored: scored.length, saved, duplicatesFiltered },
     demo: false,
   };
 }

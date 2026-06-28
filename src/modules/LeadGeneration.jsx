@@ -46,6 +46,7 @@ export default function LeadGeneration({ users = [], setUsers, setLeadBadge }) {
   const [location, setLocation] = useState('');
   const [selectedTypes, setSelectedTypes] = useState([]);
   const [radius, setRadius] = useState(5);
+  const [maxLeads, setMaxLeads] = useState(50);
   const [generating, setGenerating] = useState(false);
   const [genProgress, setGenProgress] = useState('');
   const [genResult, setGenResult] = useState(null);
@@ -102,7 +103,7 @@ export default function LeadGeneration({ users = [], setUsers, setLeadBadge }) {
     await new Promise(r => setTimeout(r, 400));
     setGenProgress('Scoring with Claude AI...');
 
-    const result = await generateLeadsAPI(location.trim(), selectedTypes, radius);
+    const result = await generateLeadsAPI(location.trim(), selectedTypes, radius, maxLeads);
 
     if (result.leads?.length) {
       setLeads(prev => {
@@ -347,6 +348,37 @@ export default function LeadGeneration({ users = [], setUsers, setLeadBadge }) {
                 ))}
               </select>
             </div>
+          </div>
+
+          <div style={S.maxLeadsRow}>
+            <label style={S.label}>How many leads do you want?</label>
+            <div style={S.quickPicks}>
+              {[25, 50, 100].map(n => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setMaxLeads(n)}
+                  style={{
+                    ...S.pickBtn,
+                    background: maxLeads === n ? 'var(--color-primary)' : 'white',
+                    color: maxLeads === n ? 'white' : '#555',
+                    borderColor: maxLeads === n ? 'var(--color-primary)' : '#DDD',
+                  }}
+                >
+                  {n}
+                </button>
+              ))}
+              <input
+                type="number"
+                min="1"
+                max="500"
+                placeholder="Custom"
+                value={maxLeads}
+                onChange={e => setMaxLeads(Math.min(500, Math.max(1, parseInt(e.target.value) || 1)))}
+                style={S.customInput}
+              />
+            </div>
+            <div style={S.hint}>Max 500 leads per request</div>
           </div>
 
           <div style={{ marginTop: 16 }}>
@@ -850,7 +882,7 @@ const S = {
 
   tabRow:      { display: 'flex', gap: 4, borderBottom: '1px solid var(--color-line)', paddingBottom: 0 },
   tab:         { background: 'transparent', border: 'none', padding: '10px 16px', fontSize: 13, fontWeight: 500, color: '#888', cursor: 'pointer', borderBottom: '2px solid transparent', fontFamily: 'inherit', transition: 'all .15s' },
-  tabActive:   { color: 'var(--color-primary)', borderBottomColor: 'var(--color-primary)', fontWeight: 600 },
+  tabActive:   { color: 'var(--color-primary)', borderBottom: '2px solid var(--color-primary)', fontWeight: 600 },
 
   formGrid:    { display: 'grid', gridTemplateColumns: '1fr 180px', gap: 16 },
   label:       { display: 'block', fontSize: 11, fontWeight: 600, color: '#666', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 },
@@ -884,4 +916,9 @@ const S = {
   progressFill:{ height: '100%', borderRadius: 4, transition: 'width .5s' },
 
   convRow:     { display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: '1px solid var(--color-line-soft)' },
+  maxLeadsRow: { marginBottom: 16, marginTop: 16 },
+  quickPicks:  { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 },
+  pickBtn:     { flex: 1, padding: '8px 12px', borderRadius: 6, border: '1px solid #DDD', fontSize: 14, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600, transition: 'all 0.15s' },
+  customInput: { width: 80, padding: '8px 12px', border: '1px solid #DDD', borderRadius: 6, fontSize: 14, fontFamily: 'inherit', textAlign: 'center', boxSizing: 'border-box' },
+  hint:        { fontSize: 11, color: '#888', marginTop: 4 },
 };
