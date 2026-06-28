@@ -4,8 +4,7 @@
         "builder": "NIXPACKS"
     },
     "deploy": {
-        "startCommand": "node server/claude-proxy.js",
-        "healthcheckPath": "/health",
+        "startCommand": "node server/automationWorker.js",
         "restartPolicyType": "ON_FAILURE"
     }
 }
