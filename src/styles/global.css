@@ -1,0 +1,134 @@
+/* ============================================================
+   Wave Closers — Global Styles
+   ============================================================ */
+
+:root {
+  /* Brand */
+  --color-bg: #FAF8F4;
+  --color-surface: #FFFFFF;
+  --color-ink: #1A1A1A;
+  --color-ink-2: #333333;
+  --color-muted: #777777;
+  --color-faint: #999999;
+  --color-line: #EBE6DC;
+  --color-line-soft: #F5F1E8;
+
+  --color-primary: #1F4E79;
+  --color-primary-soft: #F0F5FA;
+  --color-accent: #D97A5E;
+
+  --color-green: #2D9B5E;
+  --color-green-bg: #E8F4EA;
+  --color-green-text: #1F6E3C;
+  --color-amber: #D49A2B;
+  --color-amber-bg: #FBF1DD;
+  --color-amber-text: #8A5A1A;
+  --color-red: #D44A4A;
+  --color-red-bg: #FBE5E5;
+  --color-red-text: #9B2727;
+  --color-info: #5B8DEF;
+  --color-info-bg: #E8EDF4;
+  --color-info-text: #33558A;
+
+  /* Sidebar */
+  --color-sidebar: #1A1A1A;
+  --color-sidebar-active: #2A2A2A;
+  --color-sidebar-text: #EEEEEE;
+  --color-sidebar-text-muted: #BBBBBB;
+
+  /* Radius & shadow */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --shadow-drawer: -8px 0 32px rgba(0, 0, 0, 0.1);
+  --shadow-card-current: 0 4px 12px rgba(217, 122, 94, 0.2);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Söhne', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #DDD;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #BBB;
+}
+
+/* Hamburger hidden on desktop */
+.wc-hamburger { display: none !important; }
+
+@media (max-width: 768px) {
+  .wc-hamburger {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+  }
+  .wc-sidebar {
+    position: fixed !important;
+    left: -260px;
+    top: 0;
+    bottom: 0;
+    transition: left 0.25s ease;
+    z-index: 45;
+    width: 240px !important;
+  }
+  .wc-sidebar-open { left: 0 !important; }
+  .wc-sidebar-close { display: inline-block !important; }
+  .wc-main { padding: 64px 16px 24px 16px !important; }
+
+  table { font-size: 12px !important; }
+  .wc-stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  .wc-two-col { grid-template-columns: 1fr !important; }
+
+  h1 { font-size: 22px !important; }
+  h2 { font-size: 18px !important; }
+
+  .wc-drawer { width: 100% !important; max-width: 420px; }
+  .wc-col-secondary { display: none !important; }
+
+  button { min-height: 36px; }
+  input, select, textarea { min-height: 36px; font-size: 16px; }
+}
+
+/* Lead generation progress animation */
+@keyframes wc-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.wc-generating {
+  animation: wc-pulse 1.5s ease-in-out infinite;
+}
+
