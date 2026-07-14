@@ -28,18 +28,18 @@ const STAFF_ACCOUNTS = [
   { email: 'aureliab@waveclosers.com', name: 'Aureliab', role: 'recruiter' }, // Recruiter
 ];
 
-// ─── Cold-calling agent accounts (9 agents — Janina is an AGENT, not recruiter) ─
+// ─── Cold-calling agent accounts (9 agents seeded as role: agent) ─────────────
 const AGENT_ACCOUNTS = [
-  { email: 'janina@waveclosers.com',   name: 'Janina',             password: 'JaninaPass1!'  },
-  { email: 'johnm@waveclosers.com',    name: 'John Mell Morillo',  password: 'JohnmPass1!'   },
-  { email: 'giana@waveclosers.com',    name: 'Gian Ericka Arcega', password: 'GianaPass1!'   },
-  { email: 'juliusb@waveclosers.com',  name: 'Julius Bacarra',     password: 'JuliusbPass1!' },
-  { email: 'karenm@waveclosers.com',   name: 'Karen Monito',       password: 'KarenmPass1!'  },
-  { email: 'jemelyna@waveclosers.com', name: 'Jemelyn Andaya',     password: 'JemelynPass1!' },
-  { email: 'manilynp@waveclosers.com', name: 'Manilyn Parabas',    password: 'ManilynPass1!' },
-  { email: 'melaniea@waveclosers.com', name: 'Melanie Aranton',    password: 'MelaniePass1!' },
-  { email: 'aprils@waveclosers.com',   name: 'April Joy Saguid',   password: 'AprilsPass1!'  },
-].map(a => ({ ...a, role: 'cold_caller' }));
+  { email: 'janina@waveclosers.com',   name: 'Janina',    password: 'JaninaPass1!'  },
+  { email: 'johnm@waveclosers.com',    name: 'John M',    password: 'JohnmPass1!'   },
+  { email: 'giana@waveclosers.com',    name: 'Giana',     password: 'GianaPass1!'   },
+  { email: 'juliusb@waveclosers.com',  name: 'Julius B',  password: 'JuliusbPass1!' },
+  { email: 'karenm@waveclosers.com',   name: 'Karen M',   password: 'KarenmPass1!'  },
+  { email: 'jemelyna@waveclosers.com', name: 'Jemelyn',   password: 'JemelynPass1!' },
+  { email: 'manilynp@waveclosers.com', name: 'Manilyn',   password: 'ManilynPass1!' },
+  { email: 'melaniea@waveclosers.com', name: 'Melanie',   password: 'MelaniePass1!' },
+  { email: 'aprils@waveclosers.com',   name: 'April S',   password: 'AprilsPass1!'  },
+].map(a => ({ ...a, role: 'agent' }));
 
 // ─── Supervisor account ───────────────────────────────────────────────────────
 const SUPERVISOR_ACCOUNTS = [
@@ -127,7 +127,7 @@ async function seed() {
   console.log(`\n[seed-staff] Seeding complete! 🎉`);
   console.log(`  Total: ${STAFF_ACCOUNTS.length} staff + ${AGENT_ACCOUNTS.length} agents + ${SUPERVISOR_ACCOUNTS.length} supervisor = ${total} accounts`);
   console.log('  Roles: riyash=pm, william=admin, mildred=cx, sergey=marketer, matt=trainer, aureliab=recruiter');
-  console.log('  Agents: all 9 cold-calling agents seeded as cold_caller role');
+  console.log('  Agents: all 9 agents seeded as agent role');
   console.log('\n  ⚠️  REMINDER: Aureliab\'s email (aureliab@waveclosers.com) is a PLACEHOLDER.');
   console.log('  Update RECRUITER_EMAIL in .env once William confirms the real address.\n');
   console.log('  ⚠️  ACTION NEEDED: Manually add \'cold_caller\', \'independent_rep\', \'authorized_reseller\',');

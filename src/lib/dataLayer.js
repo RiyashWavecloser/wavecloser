@@ -68,7 +68,7 @@ async function get(path) {
   if (_token) headers['Authorization'] = `Bearer ${_token}`;
   
   const res = await fetch(`${PROXY}${path}`, { headers });
-  if (res.status === 401 || res.status === 403) {
+  if (res.status === 401) {
     setSession(null);
     window.location.reload();
   }
@@ -82,7 +82,7 @@ async function post(path, body) {
     headers: getHeaders(),
     body: JSON.stringify(body),
   });
-  if (res.status === 401 || res.status === 403) {
+  if (res.status === 401) {
     setSession(null);
     window.location.reload();
   }
@@ -96,7 +96,7 @@ async function patch(path, body) {
     headers: getHeaders(),
     body: JSON.stringify(body),
   });
-  if (res.status === 401 || res.status === 403) {
+  if (res.status === 401) {
     setSession(null);
     window.location.reload();
   }
@@ -112,7 +112,7 @@ async function del(path) {
     method: 'DELETE',
     headers
   });
-  if (res.status === 401 || res.status === 403) {
+  if (res.status === 401) {
     setSession(null);
     window.location.reload();
   }
@@ -429,7 +429,7 @@ export async function addRecruitAPI(data) {
       headers: getHeaders(),
       body: JSON.stringify(data),
     });
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       setSession(null);
       window.location.reload();
     }
@@ -466,7 +466,7 @@ export async function updateRecruitAPI(id, data) {
       headers: getHeaders(),
       body: JSON.stringify(data),
     });
-    if (res.status === 401 || res.status === 403) { setSession(null); window.location.reload(); }
+    if (res.status === 401) { setSession(null); window.location.reload(); }
     if (!res.ok) throw new Error(`PUT /api/recruiting/:id => ${res.status}`);
     return await res.json();
   } catch {
@@ -483,7 +483,7 @@ export async function deleteRecruitAPI(id) {
       method: 'DELETE',
       headers: getHeaders(),
     });
-    if (res.status === 401 || res.status === 403) { setSession(null); window.location.reload(); }
+    if (res.status === 401) { setSession(null); window.location.reload(); }
     if (!res.ok) throw new Error(`DELETE /api/recruiting/:id => ${res.status}`);
     return await res.json();
   } catch {
@@ -542,7 +542,7 @@ export async function searchCraigslistResumesAPI(city, keywords) {
     const url = `${PROXY}/api/recruiting/craigslist-search?city=${encodeURIComponent(city)}&keywords=${encodeURIComponent(keywords)}`;
     console.log('[Craigslist] Calling:', url);
     const res = await fetch(url, { headers: getHeaders() });
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       setSession(null);
       window.location.reload();
     }

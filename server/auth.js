@@ -160,7 +160,7 @@ export function getPortalForRole(role) {
 /**
  * Middleware: require any agent-type role (cold_caller, independent_rep, authorized_reseller, etc.).
  */
-const AGENT_ROLES = ['cold_caller', 'independent_rep', 'authorized_reseller', 'iso_investor', 'referral_partner', 'agent_supervisor'];
+const AGENT_ROLES = ['cold_caller', 'independent_rep', 'authorized_reseller', 'iso_investor', 'referral_partner', 'agent_supervisor', 'agent'];
 
 export function authenticateAgent(req, res, next) {
   requireAuth(req, res, () => requireRole(...AGENT_ROLES)(req, res, next));

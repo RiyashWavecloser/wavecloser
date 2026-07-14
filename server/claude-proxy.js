@@ -806,9 +806,9 @@ app.post('/api/leads/:id/assign-partner', requireAuth, async (req, res) => {
 
 // ─── Recruiting Pipeline (Workflow B) ─────────────────────────────────────────
 
-// All recruiting endpoints require admin, pm, or recruiter role
+// All recruiting endpoints require admin, pm, recruiter, or agent role
 const requireRecruiterAccess = (req, res, next) =>
-  requireAuth(req, res, () => requireRole('admin', 'pm', 'recruiter')(req, res, next));
+  requireAuth(req, res, () => requireRole('admin', 'pm', 'recruiter', 'agent')(req, res, next));
 
 // GET /api/recruiting — list all recruits (recruiter sees own; admin/pm see all)
 app.get('/api/recruiting', requireRecruiterAccess, async (req, res) => {

@@ -22,6 +22,7 @@ export const ROLES = {
   ISO_INVESTOR:         'iso_investor',
   REFERRAL_PARTNER:     'referral_partner',
   AGENT_SUPERVISOR:     'agent_supervisor',
+  AGENT:                'agent',
 };
 
 export const ROLE_LABELS = {
@@ -38,6 +39,7 @@ export const ROLE_LABELS = {
   iso_investor:         'ISO Investor',
   referral_partner:     'Referral Partner',
   agent_supervisor:     'Agent Supervisor',
+  agent:                'Agent',
 };
 
 // All agent-type roles — share the Agent Portal (Workflow A)
@@ -48,6 +50,7 @@ export const AGENT_ROLES = [
   'iso_investor',
   'referral_partner',
   'agent_supervisor',
+  'agent',
 ];
 
 const FULL_ACCESS = [
@@ -70,6 +73,7 @@ export const ROLE_VIEWS = {
   iso_investor:         ['agent-portal'],
   referral_partner:     ['agent-portal'],
   agent_supervisor:     ['agent-portal'],
+  agent:                ['agent-portal'],
 };
 
 export const ROLE_USER_FILTER = {
@@ -86,6 +90,7 @@ export const ROLE_USER_FILTER = {
   iso_investor:         () => false,
   referral_partner:     () => false,
   agent_supervisor:     () => false,
+  agent:                () => false,
 };
 
 // Real staff accounts — used for reference only (actual seeding done by seed-staff.mjs)

@@ -8,6 +8,7 @@ import {
   loadLeadsFromStorage,
   saveLeadsToStorage,
 } from '../lib/dataLayer.js';
+import RecruitingPipelineView from '../components/RecruitingPipelineView.jsx';
 
 const IS_SUPERVISOR_ROLE = 'agent_supervisor';
 
@@ -51,6 +52,7 @@ export default function AgentPortal({ currentUser, onLogout }) {
   const [isDemo, setIsDemo] = useState(true);
   // 'assigned' | 'generate' | 'history'
   const [activeTab, setActiveTab] = useState('assigned');
+  const [subPortal, setSubPortal] = useState('sales'); // 'sales' | 'recruiting'
 
   // Supervisor state
   const [supervisorAgent, setSupervisorAgent] = useState('all');
@@ -398,12 +400,52 @@ export default function AgentPortal({ currentUser, onLogout }) {
         </div>
       </header>
 
-      {/* Demo banner */}
-      {isDemo && !isSupervisor && (
-        <div style={S.demoBanner}>
-          ⚠️ Demo mode — no real leads yet. Use <strong>&quot;Generate My Own Leads&quot;</strong> to pull fresh leads, or wait for batch assignment.
-        </div>
-      )}
+      {/* Sub-portal Toggle Navigation */}
+      <div style={{ display: 'flex', background: '#EAECEF', borderRadius: 8, padding: 4, margin: '14px 20px 8px 20px' }}>
+        <button
+          onClick={() => setSubPortal('sales')}
+          style={{
+            flex: 1,
+            background: subPortal === 'sales' ? '#1F4E79' : 'transparent',
+            color: subPortal === 'sales' ? '#FFF' : '#555',
+            border: 0,
+            borderRadius: 6,
+            padding: '8px 12px',
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: 'pointer',
+            transition: 'all 0.2s'
+          }}
+        >
+          💼 Sales Leads
+        </button>
+        <button
+          onClick={() => setSubPortal('recruiting')}
+          style={{
+            flex: 1,
+            background: subPortal === 'recruiting' ? '#1F4E79' : 'transparent',
+            color: subPortal === 'recruiting' ? '#FFF' : '#555',
+            border: 0,
+            borderRadius: 6,
+            padding: '8px 12px',
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: 'pointer',
+            transition: 'all 0.2s'
+          }}
+        >
+          ◎ Recruiting
+        </button>
+      </div>
+
+      {subPortal === 'sales' ? (
+        <>
+          {/* Demo banner */}
+          {isDemo && !isSupervisor && (
+            <div style={S.demoBanner}>
+              ⚠️ Demo mode — no real leads yet. Use <strong>&quot;Generate My Own Leads&quot;</strong> to pull fresh leads, or wait for batch assignment.
+            </div>
+          )}
 
       {/* Supervisor: agent selector */}
       {isSupervisor && (
@@ -547,6 +589,12 @@ export default function AgentPortal({ currentUser, onLogout }) {
               </>
             )}
           </div>
+        </div>
+      )}
+        </>
+      ) : (
+        <div style={{ padding: '0 20px' }}>
+          <RecruitingPipelineView currentUser={currentUser} />
         </div>
       )}
 
