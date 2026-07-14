@@ -1191,6 +1191,29 @@ export async function addRecruit(data) {
     return normalizeRecruit(rec);
   } catch (err) {
     console.warn('[airtable] addRecruit error:', err.message);
+    if (err.message?.includes('select option') && data.source && data.source !== 'Other') {
+      console.log(`[airtable] Retrying addRecruit with Source: "Other" due to select option restriction...`);
+      try {
+        const [rec] = await retry(() =>
+          base()('RecruitingPipeline').create([{
+            fields: {
+              Name:    data.name,
+              Email:   data.email,
+              Phone:   data.phone   || '',
+              Source:  'Other',
+              Type:    data.type    || 'Independent Rep',
+              Status:  'New',
+              Notes:   data.notes ? `[Source: ${data.source}]\n${data.notes}` : `[Source: ${data.source}]`,
+              AddedBy: data.addedBy || '',
+              AddedAt: new Date().toISOString(),
+            }
+          }])
+        );
+        return normalizeRecruit(rec);
+      } catch (err2) {
+        console.warn('[airtable] addRecruit retry error:', err2.message);
+      }
+    }
     return null;
   }
 }
@@ -1249,6 +1272,26 @@ export async function updateRecruit(id, data) {
     return normalizeRecruit(rec);
   } catch (err) {
     console.warn('[airtable] updateRecruit error:', err.message);
+    if (err.message?.includes('select option') && data.source !== undefined && data.source !== 'Other') {
+      console.log(`[airtable] Retrying updateRecruit with Source: "Other" due to select option restriction...`);
+      try {
+        const fields = {};
+        if (data.name   !== undefined) fields.Name   = data.name;
+        if (data.email  !== undefined) fields.Email  = data.email;
+        if (data.phone  !== undefined) fields.Phone  = data.phone  || '';
+        fields.Source = 'Other';
+        if (data.type   !== undefined) fields.Type   = data.type   || '';
+        const notesPrefix = `[Source: ${data.source}]`;
+        const baseNotes = data.notes !== undefined ? data.notes : '';
+        fields.Notes  = baseNotes ? `${notesPrefix}\n${baseNotes}` : notesPrefix;
+        const [rec] = await retry(() =>
+          base()('RecruitingPipeline').update([{ id, fields }])
+        );
+        return normalizeRecruit(rec);
+      } catch (err2) {
+        console.warn('[airtable] updateRecruit retry error:', err2.message);
+      }
+    }
     return null;
   }
 }
