@@ -6,7 +6,7 @@
  *   - src/modules/RecruiterPortal.jsx (Standard Recruiter console)
  *   - src/modules/AgentPortal.jsx (Agent console Recruiting tab)
  */
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Card, CardHeader, Note } from './ui.jsx';
 import {
   RECRUIT_STATUSES, RECRUIT_STAGES, RECRUIT_SOURCES, RECRUIT_TYPES, ONBOARDING_STAGES,
@@ -80,6 +80,19 @@ export default function RecruitingPipelineView({ currentUser }) {
   // Tab state
   const [activeTab, setActiveTab] = useState('pipeline');
 
+  // Quick outreach progress notes state
+  const [quickNotes, setQuickNotes] = useState('');
+  const [quickNotesSaving, setQuickNotesSaving] = useState(false);
+
+  // Performance tab filters state
+  const [selectedAgentFilter, setSelectedAgentFilter] = useState('All');
+  const [selectedStatusFilter, setSelectedStatusFilter] = useState('All');
+  const [expandedNotes, setExpandedNotes] = useState({});
+
+  const toggleNotes = (id) => {
+    setExpandedNotes(prev => ({ ...prev, [id]: !prev[id] }));
+  };
+
   // Pipeline state
   const [recruits,      setRecruits]      = useState([]);
   const [loading,       setLoading]       = useState(true);
@@ -116,6 +129,30 @@ export default function RecruitingPipelineView({ currentUser }) {
   const [clDemo,     setClDemo]     = useState(false);
   const [clAdding,   setClAdding]   = useState({});
   const [clAdded,    setClAdded]    = useState({});
+
+  // ─── Sync quick notes when recruit selection changes ────────────────────────
+  useEffect(() => {
+    if (selected) {
+      setQuickNotes(selected.notes || '');
+    } else {
+      setQuickNotes('');
+    }
+  }, [selected]);
+
+  // ─── Save quick progress notes ──────────────────────────────────────────────
+  async function handleSaveQuickNotes() {
+    if (!selected) return;
+    setQuickNotesSaving(true);
+    const res = await updateRecruitAPI(selected.id, { notes: quickNotes });
+    if (res?.updated) {
+      setRecruits(prev => prev.map(r => r.id === selected.id ? { ...r, notes: quickNotes } : r));
+      setSelected(prev => ({ ...prev, notes: quickNotes }));
+      showToast('Outreach notes updated successfully!');
+    } else {
+      showToast('Failed to save notes. Try again.', 'error');
+    }
+    setQuickNotesSaving(false);
+  }
 
   // ─── Close menu on outside click ────────────────────────────────────────────
   useEffect(() => {
@@ -284,7 +321,7 @@ export default function RecruitingPipelineView({ currentUser }) {
     const name    = rawName.length > 2 ? rawName : result.title.slice(0, 40);
     const recruitData = {
       name,
-      email:   '',
+      email:   result.email || '',
       phone:   result.phone || '',
       source:  'Craigslist',
       type:    '',
@@ -321,6 +358,223 @@ export default function RecruitingPipelineView({ currentUser }) {
     acc[s] = recruits.filter(r => r.status === s).length;
     return acc;
   }, {});
+
+  // ─── Render Agent Performance Tab (Admin/Recruiter) ─────────────────────────
+  const renderPerformanceTab = () => {
+    // 1. Group recruits by agent
+    const agentAggregates = {};
+    recruits.forEach(r => {
+      const agent = r.addedBy || 'System / Craigslist';
+      if (!agentAggregates[agent]) {
+        agentAggregates[agent] = {
+          name: agent,
+          total: 0,
+          New: 0,
+          Contacted: 0,
+          Interested: 0,
+          Onboarding: 0,
+          Active: 0,
+          Declined: 0
+        };
+      }
+      agentAggregates[agent].total += 1;
+      if (r.status && agentAggregates[agent][r.status] !== undefined) {
+        agentAggregates[agent][r.status] += 1;
+      }
+    });
+    const aggregatesList = Object.values(agentAggregates).sort((a, b) => b.total - a.total);
+
+    // 2. Filters for detailed log
+    const agentNames = Array.from(new Set(recruits.map(r => r.addedBy || 'System / Craigslist'))).filter(Boolean).sort();
+    
+    const detailedList = recruits.filter(r => {
+      const agent = r.addedBy || 'System / Craigslist';
+      const matchAgent = selectedAgentFilter === 'All' || agent === selectedAgentFilter;
+      const matchStatus = selectedStatusFilter === 'All' || r.status === selectedStatusFilter;
+      return matchAgent && matchStatus;
+    });
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        {/* Aggregates Summary Card */}
+        <Card>
+          <CardHeader
+            title="Agent Recruiting Activity"
+            sub="Aggregated outreach performance metrics per team member"
+          />
+          <div style={{ overflowX: 'auto' }}>
+            <table style={S.table}>
+              <thead>
+                <tr>
+                  <th style={S.th}>Agent / Source</th>
+                  <th style={{ ...S.th, textAlign: 'center' }}>Total Added</th>
+                  <th style={{ ...S.th, textAlign: 'center' }}>New</th>
+                  <th style={{ ...S.th, textAlign: 'center' }}>Contacted</th>
+                  <th style={{ ...S.th, textAlign: 'center', color: '#1D7A48' }}>Interested</th>
+                  <th style={{ ...S.th, textAlign: 'center' }}>Onboarding</th>
+                  <th style={{ ...S.th, textAlign: 'center', color: '#1A5C32' }}>Active</th>
+                  <th style={{ ...S.th, textAlign: 'center', color: '#882222' }}>Declined</th>
+                </tr>
+              </thead>
+              <tbody>
+                {aggregatesList.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} style={{ ...S.td, textAlign: 'center', padding: 24, color: '#888' }}>
+                      No outreach activity recorded yet.
+                    </td>
+                  </tr>
+                ) : (
+                  aggregatesList.map(a => (
+                    <tr key={a.name} style={S.tr}>
+                      <td style={{ ...S.td, fontWeight: 700, cursor: 'default' }}>{a.name}</td>
+                      <td style={{ ...S.td, textAlign: 'center', fontWeight: 600, cursor: 'default' }}>{a.total}</td>
+                      <td style={{ ...S.td, textAlign: 'center', color: '#666', cursor: 'default' }}>{a.New}</td>
+                      <td style={{ ...S.td, textAlign: 'center', color: '#8A5A1A', cursor: 'default' }}>{a.Contacted}</td>
+                      <td style={{ ...S.td, textAlign: 'center', color: '#1D7A48', fontWeight: 700, background: a.Interested > 0 ? '#EDF7F1' : 'transparent', cursor: 'default' }}>{a.Interested}</td>
+                      <td style={{ ...S.td, textAlign: 'center', color: '#5B2DA8', cursor: 'default' }}>{a.Onboarding}</td>
+                      <td style={{ ...S.td, textAlign: 'center', color: '#1A5C32', fontWeight: 700, background: a.Active > 0 ? '#E8F7EC' : 'transparent', cursor: 'default' }}>{a.Active}</td>
+                      <td style={{ ...S.td, textAlign: 'center', color: '#882222', cursor: 'default' }}>{a.Declined}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+
+        {/* Detailed Outreach Log Card */}
+        <Card>
+          <CardHeader
+            title="Outreach & Onboarding Progress Logs"
+            sub="Detailed list of all recruitment leads contacted, including progress status and notes"
+          />
+
+          {/* Filters */}
+          <div style={{ ...S.toolbar, marginBottom: 12 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={S.label}>Filter by Agent</label>
+              <select
+                value={selectedAgentFilter}
+                onChange={e => setSelectedAgentFilter(e.target.value)}
+                style={S.select}
+              >
+                <option value="All">All Agents</option>
+                {agentNames.map(name => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={S.label}>Filter by Status</label>
+              <select
+                value={selectedStatusFilter}
+                onChange={e => setSelectedStatusFilter(e.target.value)}
+                style={S.select}
+              >
+                <option value="All">All Statuses</option>
+                {RECRUIT_STATUSES.map(status => (
+                  <option key={status} value={status}>{status}</option>
+                ))}
+              </select>
+            </div>
+            <div style={{ marginLeft: 'auto', alignSelf: 'end' }}>
+              <span style={{ fontSize: 13, color: '#666', fontWeight: 600 }}>
+                Showing {detailedList.length} lead{detailedList.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+          </div>
+
+          {/* Log Table */}
+          <div style={{ overflowX: 'auto' }}>
+            <table style={S.table}>
+              <thead>
+                <tr>
+                  <th style={S.th}>Candidate</th>
+                  <th style={S.th}>Contacted By</th>
+                  <th style={S.th}>Status</th>
+                  <th style={S.th}>Last Update</th>
+                  <th style={S.th}>Progress Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {detailedList.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} style={{ ...S.td, textAlign: 'center', padding: 32, color: '#888' }}>
+                      No matches found. Try modifying your filters.
+                    </td>
+                  </tr>
+                ) : (
+                  detailedList.map(r => {
+                    const sc = STATUS_COLORS[r.status] || {};
+                    return (
+                      <tr key={r.id} style={S.tr}>
+                        <td style={{ ...S.td, cursor: 'default' }}>
+                          <div style={{ fontWeight: 600 }}>{r.name}</div>
+                          <div style={{ fontSize: 11, color: '#666' }}>
+                            {r.email || 'No email'} {r.phone ? `· ${r.phone}` : ''}
+                          </div>
+                        </td>
+                        <td style={{ ...S.td, fontWeight: 500, cursor: 'default' }}>
+                          {r.addedBy || 'System / Craigslist'}
+                        </td>
+                        <td style={{ ...S.td, cursor: 'default' }}>
+                          <span style={{
+                            fontSize: 11,
+                            padding: '3px 8px',
+                            borderRadius: 4,
+                            fontWeight: 600,
+                            background: sc.bg,
+                            color: sc.color
+                          }}>
+                            {r.status}
+                          </span>
+                        </td>
+                        <td style={{ ...S.td, fontSize: 12, color: '#888', cursor: 'default' }}>
+                          {r.addedAt ? new Date(r.addedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' }) : '--'}
+                        </td>
+                        <td style={{ ...S.td, fontSize: 12, color: '#444', maxWidth: 300, whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.4, cursor: 'default' }}>
+                          {r.notes ? (
+                            r.notes.length > 90 ? (
+                              <div>
+                                {expandedNotes[r.id] ? r.notes : `${r.notes.slice(0, 90)}...`}
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); toggleNotes(r.id); }}
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    color: 'var(--color-primary, #1F4E79)',
+                                    fontWeight: 600,
+                                    fontSize: 11,
+                                    cursor: 'pointer',
+                                    marginLeft: 6,
+                                    padding: 0,
+                                    textDecoration: 'underline',
+                                    fontFamily: 'inherit'
+                                  }}
+                                >
+                                  {expandedNotes[r.id] ? 'Show less' : 'Read more'}
+                                </button>
+                              </div>
+                            ) : (
+                              r.notes
+                            )
+                          ) : (
+                            <span style={{ color: '#BBB', fontStyle: 'italic' }}>No notes recorded</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </div>
+    );
+  };
+
+  const showPerformanceTab = ['admin', 'pm', 'recruiter'].includes(currentUser?.role);
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
@@ -374,6 +628,15 @@ export default function RecruitingPipelineView({ currentUser }) {
         >
           Search Craigslist Resumes
         </button>
+        {showPerformanceTab && (
+          <button
+            id="tab-performance"
+            onClick={() => setActiveTab('performance')}
+            style={{ ...S.tabBtn, ...(activeTab === 'performance' ? S.tabActive : {}) }}
+          >
+            📊 Agent Performance
+          </button>
+        )}
       </div>
 
       {/* ================================================================
@@ -484,7 +747,9 @@ export default function RecruitingPipelineView({ currentUser }) {
                                 <tr key={r.id} style={{ ...S.tr, background: selected?.id === r.id ? '#EEF4FF' : 'transparent' }}>
                                   <td style={S.td} onClick={() => { setSelected(selected?.id === r.id ? null : r); setEditMode(false); }}>
                                     <div style={{ fontWeight: 600 }}>{r.name}</div>
-                                    <div style={{ fontSize: 11, color: '#999' }}>{r.email}</div>
+                                    <div style={{ fontSize: 11, color: '#666' }}>
+                                      {r.email || 'No email'} {r.phone ? `· ${r.phone}` : ''}
+                                    </div>
                                   </td>
                                   <td style={S.td} onClick={() => { setSelected(selected?.id === r.id ? null : r); setEditMode(false); }}>
                                     <span style={{ fontSize: 12, fontWeight: 600, color: '#555' }}>{r.type || '--'}</span>
@@ -545,7 +810,7 @@ export default function RecruitingPipelineView({ currentUser }) {
               const prevStage  = !isDeclined && stepIdx > 0  ? RECRUIT_STAGES[stepIdx - 1] : null;
 
               return (
-                <Card style={{ position: 'sticky', top: 16 }}>
+                <Card style={{ position: 'sticky', top: 16, maxHeight: 'calc(100vh - 120px)', overflowY: 'auto' }}>
                   {/* Header row */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
                     <div>
@@ -717,6 +982,47 @@ export default function RecruitingPipelineView({ currentUser }) {
                         </div>
                       )}
 
+                      {/* Outreach progress textarea */}
+                      <div style={{ marginTop: 14, borderTop: '1px solid #EEE', paddingTop: 12 }}>
+                        <div style={S.infoLabel}>Log Progress / Outreach Notes</div>
+                        <textarea
+                          value={quickNotes}
+                          onChange={e => setQuickNotes(e.target.value)}
+                          style={{
+                            width: '100%',
+                            padding: '8px 10px',
+                            borderRadius: 6,
+                            border: '1px solid #DDD',
+                            fontSize: 12,
+                            minHeight: 70,
+                            marginTop: 6,
+                            fontFamily: 'inherit',
+                            resize: 'vertical',
+                            boxSizing: 'border-box'
+                          }}
+                          placeholder="Log outreach progress, schedule updates, or notes..."
+                        />
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+                          <button
+                            onClick={handleSaveQuickNotes}
+                            disabled={quickNotesSaving || quickNotes === (selected.notes || '')}
+                            style={{
+                              padding: '5px 12px',
+                              background: 'var(--color-primary, #1F4E79)',
+                              color: 'white',
+                              border: 0,
+                              borderRadius: 4,
+                              fontSize: 11,
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                              opacity: (quickNotesSaving || quickNotes === (selected.notes || '')) ? 0.5 : 1
+                            }}
+                          >
+                            {quickNotesSaving ? 'Saving...' : 'Save Notes'}
+                          </button>
+                        </div>
+                      </div>
+
                       {/* Delete button at bottom of panel */}
                       <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #F0F0F0' }}>
                         <button onClick={() => confirmDelete(selected)} style={{ ...S.dangerOutBtn, width: '100%' }}>
@@ -826,6 +1132,9 @@ export default function RecruitingPipelineView({ currentUser }) {
                                   ? <span style={{ color: '#1F4E79', fontWeight: 600 }}>Tel: {result.phone}</span>
                                   : <span style={{ color: '#BBB' }}>No phone listed</span>
                                 }
+                                {result.email && (
+                                  <span style={{ color: '#2D9B5E', fontWeight: 600 }}>Email: {result.email}</span>
+                                )}
                               </div>
                               {result.description && (
                                 <div style={{ fontSize: 13, color: '#555', lineHeight: 1.6, background: '#F8F9FA', borderRadius: 6, padding: '8px 12px', fontStyle: 'italic' }}>
@@ -880,6 +1189,9 @@ export default function RecruitingPipelineView({ currentUser }) {
           )}
         </div>
       )}
+
+      {/* TAB 3 -- AGENT PERFORMANCE DASHBOARD & OUTREACH LOGS */}
+      {activeTab === 'performance' && showPerformanceTab && renderPerformanceTab()}
     </div>
   );
 }

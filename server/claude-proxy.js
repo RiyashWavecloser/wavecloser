@@ -973,10 +973,13 @@ async function searchCraigslistResumes(city, keywords, limit = 50) {
             const desc = r.description || r.postingBody || '';
             const phoneFromDesc = desc.match(/\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}/)?.[0] || '';
             const phone = r.phone || (r.phoneNumbers && r.phoneNumbers[0]) || phoneFromDesc;
+            const emailFromDesc = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0] || '';
+            const email = r.email || r.replyEmail || r.contactEmail || emailFromDesc || '';
             return {
               title:       r.title                              || '',
               description: desc.slice(0, 500),
               phone:       phone                                || '',
+              email:       email                                || '',
               date:        r.postedAt || r.updatedAt || r.time || r.date || '',
               link:        r.url  || r.link                    || '',
             };
@@ -1037,9 +1040,10 @@ async function searchCraigslistResumes(city, keywords, limit = 50) {
       ).trim();
       const date  = (block.match(/<pubDate>(.*?)<\/pubDate>/)?.[1] || '').trim();
       const phone = desc.match(/\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}/)?.[0] || '';
+      const email = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0] || '';
 
       if (title) {
-        items.push({ title, description: desc, link, date, phone });
+        items.push({ title, description: desc, link, date, phone, email });
       }
     }
 

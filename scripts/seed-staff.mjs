@@ -26,6 +26,7 @@ const STAFF_ACCOUNTS = [
   // Update RECRUITER_EMAIL in .env once confirmed — no code changes needed.
   // Open Item #11: "Confirm Aureliab's exact email address (Recruiter/Franchise Sales)"
   { email: 'aureliab@waveclosers.com', name: 'Aureliab', role: 'recruiter' }, // Recruiter
+  { email: 'admintest@waveclosers.com', name: 'Admin Test', role: 'admin' }, // Test Admin Account
 ];
 
 // ─── Cold-calling agent accounts (9 agents seeded as role: agent) ─────────────
