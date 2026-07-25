@@ -1065,12 +1065,22 @@ async function fetchViaApify(citySlug, keywords, limit, apiKey) {
     const desc           = r.description || r.postingBody || '';
     const phoneFromDesc  = desc.match(/\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}/)?.[0] || '';
     const emailFromDesc  = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0] || '';
+
+    // Standardize URL: use numeric postId format when available (immune to 404/case issues)
+    let validUrl = '';
+    const region = r.region || citySlug;
+    if (r.postId) {
+      validUrl = `https://${region}.craigslist.org/res/${r.postId}.html`;
+    } else {
+      validUrl = (r.url || r.link || '').trim();
+    }
+
     return {
       title:       r.title       || 'Untitled',
       description: desc.slice(0, 500),
       phone:       r.phone       || phoneFromDesc || '',
       email:       r.email       || r.replyEmail  || emailFromDesc || '',
-      link:        r.url         || r.link        || '',
+      link:        validUrl,
       date:        r.postedAt    || r.date        || '',
       market:      citySlug,
     };
@@ -1417,19 +1427,21 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
       }
 
       for (const resume of batch) {
-        const url = (resume.link || '').trim().toLowerCase();
+        const rawUrl = (resume.link || resume.craigslistUrl || resume.url || '').trim();
+        const urlForDedup = rawUrl.toLowerCase();
         await saveResumeLead({
           title:         resume.title,
           description:   resume.description,
           phone:         resume.phone || '',
-          craigslistUrl: url,
+          email:         resume.email || '',
+          craigslistUrl: rawUrl, // Preserve exact case-sensitive URL
           market:        city,
           assignedTo:    agentName,
           assignedDate:  today,
           status:        'New',
         });
-        await registerResumeAsAssigned(url, agentName, today);
-        globalDedupeSet.add(url);
+        await registerResumeAsAssigned(rawUrl, agentName, today);
+        globalDedupeSet.add(urlForDedup);
       }
 
       summary.push({ agent: agentName, assigned: batch.length });

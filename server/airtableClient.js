@@ -1378,11 +1378,11 @@ export async function getGlobalResumeDeduplicationSet() {
  * Once a URL is here, it can NEVER be assigned to anyone again.
  */
 export async function registerResumeAsAssigned(url, assignedTo, assignedDate) {
-  if (!isConfigured()) return;
+  if (!isConfigured() || !url) return;
   try {
     await retry(() =>
       base()('ResumeDeduplicationRegistry').create({
-        CraigslistURL: url.trim().toLowerCase(),
+        CraigslistURL: url.trim(), // Preserve exact case-sensitive URL
         FirstSeenAt:   new Date().toISOString(),
         AssignedTo:    assignedTo || '',
         AssignedDate:  assignedDate || new Date().toISOString().slice(0, 10),
@@ -1624,8 +1624,8 @@ export async function bulkAssignResumeLeads(resumes, agentName, market) {
   let skipped  = 0;
 
   for (const resume of resumes) {
-    const url = (resume.link || resume.craigslistUrl || '').trim().toLowerCase();
-    if (!url || globalDedupeSet.has(url)) {
+    const rawUrl = (resume.link || resume.craigslistUrl || resume.url || '').trim();
+    if (!rawUrl || globalDedupeSet.has(rawUrl.toLowerCase())) {
       skipped++;
       continue;
     }
@@ -1635,14 +1635,14 @@ export async function bulkAssignResumeLeads(resumes, agentName, market) {
       description:   resume.description,
       phone:         resume.phone || '',
       email:         resume.email || '',
-      craigslistUrl: url,
+      craigslistUrl: rawUrl, // Preserve exact case-sensitive URL!
       market:        market || resume.market || '',
       assignedTo:    agentName,
       assignedDate:  today,
     });
 
-    await registerResumeAsAssigned(url, agentName, today);
-    globalDedupeSet.add(url); // prevent duplicates within this batch
+    await registerResumeAsAssigned(rawUrl, agentName, today);
+    globalDedupeSet.add(rawUrl.toLowerCase());
     assigned++;
   }
 
