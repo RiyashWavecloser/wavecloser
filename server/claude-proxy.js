@@ -1253,11 +1253,27 @@ app.post('/api/resume-leads/distribute-now', requireResumeAdmin, async (req, res
           return true;
         });
 
-        console.log(`[Manual Dist] ${freshResumes.length} fresh resumes, distributing to ${agents.length} agents`);
+        console.log(`[Manual Dist] ${freshResumes.length} fresh resumes, distributing to ${agents.length} agents (Round-Robin)`);
+        const buckets = {};
+        for (const a of agents) {
+          buckets[a.name] = [];
+        }
+
         let pool = [...freshResumes];
+        let agentIndex = 0;
+
+        while (pool.length > 0) {
+          const agent = agents[agentIndex];
+          if (buckets[agent.name].length < leadsPerAgent) {
+            buckets[agent.name].push(pool.shift());
+          }
+          agentIndex = (agentIndex + 1) % agents.length;
+          const allFull = agents.every(a => buckets[a.name].length >= leadsPerAgent);
+          if (allFull) break;
+        }
 
         for (const agent of agents) {
-          const batch = pool.splice(0, leadsPerAgent);
+          const batch = buckets[agent.name];
           if (!batch.length) {
             await appendLog({ task: 'Resume distribution skipped', target: `${agent.name} — pool exhausted`, status: 'alert' });
             continue;
@@ -1365,12 +1381,35 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
       });
     }
 
-    // Step 4 — Assign to each selected agent
-    let pool    = [...freshResumes];
-    let summary = [];
+    // Step 4 — Assign to each selected agent using Round-Robin distribution
+    const buckets = {};
+    for (const name of agentNames) {
+      buckets[name] = [];
+    }
 
+    let pool = [...freshResumes];
+    let agentIndex = 0;
+
+    while (pool.length > 0) {
+      const agentName = agentNames[agentIndex];
+
+      // Only add if this agent hasn't reached countPerAgent limit yet
+      if (buckets[agentName].length < countPerAgent) {
+        buckets[agentName].push(pool.shift()); // take one resume from pool
+      }
+
+      // Rotate to next agent
+      agentIndex = (agentIndex + 1) % agentNames.length;
+
+      // Stop if all selected agents have reached their countPerAgent limit
+      const allFull = agentNames.every(name => buckets[name].length >= countPerAgent);
+      if (allFull) break;
+    }
+
+    // Now save each agent's bucket to Airtable
+    let summary = [];
     for (const agentName of agentNames) {
-      const batch = pool.splice(0, countPerAgent);
+      const batch = buckets[agentName];
       if (batch.length === 0) {
         summary.push({ agent: agentName, assigned: 0, note: 'Pool exhausted' });
         continue;
@@ -1378,7 +1417,6 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
 
       for (const resume of batch) {
         const url = (resume.link || '').trim().toLowerCase();
-        // Save to ResumeLeads working table
         await saveResumeLead({
           title:         resume.title,
           description:   resume.description,
@@ -1389,7 +1427,6 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
           assignedDate:  today,
           status:        'New',
         });
-        // Lock permanently in dedup registry
         await registerResumeAsAssigned(url, agentName, today);
         globalDedupeSet.add(url);
       }
@@ -1404,7 +1441,7 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
     }
 
     const totalAssigned = summary.reduce((s, r) => s + r.assigned, 0);
-    console.log(`[BulkAssign] Complete — ${totalAssigned} resumes assigned across ${agentNames.length} agents`);
+    console.log(`[BulkAssign] Complete — ${totalAssigned} resumes assigned across ${agentNames.length} agents (Round-Robin)`);
 
     res.json({
       success:      true,

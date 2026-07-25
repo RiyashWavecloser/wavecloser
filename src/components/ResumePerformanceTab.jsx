@@ -390,13 +390,25 @@ export default function ResumePerformanceTab({ currentUser }) {
               <div style={assignResult.success ? S.successBox : S.errorBox}>
                 {assignResult.success ? (
                   <>
-                    <div>✅ Done — {assignResult.totalAssigned} resumes assigned across {selectedAgents.length} agents</div>
-                    <div style={S.subtext}>Found {assignResult.totalFound} total — {assignResult.freshFound} were fresh (not previously assigned)</div>
-                    {assignResult.summary?.map(s => (
-                      <div key={s.agent} style={S.summaryRow}>
-                        {s.assigned > 0 ? '✓' : '⚠'} {s.agent} — {s.assigned} assigned {s.note ? `(${s.note})` : ''}
+                    <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>✅ Assignment Complete</div>
+                    <div style={{ fontSize: 12, color: '#555', marginBottom: 4 }}>
+                      Found {assignResult.totalFound} resumes → {assignResult.freshFound} were fresh
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#1F4E79', marginBottom: 8 }}>
+                      {assignResult.totalAssigned} total assigned across {selectedAgents.length} agents
+                    </div>
+                    <div style={{ borderTop: '1px solid #BCE5CE', paddingTop: 8, marginTop: 4 }}>
+                      {assignResult.summary?.map(s => (
+                        <div key={s.agent} style={S.summaryRow}>
+                          {s.assigned > 0 ? '✓' : '⚠'} <strong>{s.agent}</strong> — {s.assigned} resume{s.assigned !== 1 ? 's' : ''} {s.note ? `(${s.note})` : ''}
+                        </div>
+                      ))}
+                    </div>
+                    {assignResult.freshFound < selectedAgents.length * countPerAgent && (
+                      <div style={{ marginTop: 10, fontSize: 11, color: '#666', fontStyle: 'italic', borderTop: '1px dashed #BCE5CE', paddingTop: 6 }}>
+                        ℹ Only {assignResult.freshFound} fresh resumes were available. Try a different city or keywords to get more.
                       </div>
-                    ))}
+                    )}
                   </>
                 ) : (
                   <div>⚠ {assignResult.message || 'Assignment failed — check server logs'}</div>

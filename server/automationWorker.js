@@ -695,10 +695,27 @@ async function distributeResumeLeads() {
     }).catch(() => {});
   }
 
-  // Step 5 — Assign leadsPerAgent leads to each agent sequentially
+  // Step 5 — Assign leadsPerAgent leads to each agent using Round-Robin distribution
+  const buckets = {};
+  for (const a of agents) {
+    buckets[a.name] = [];
+  }
+
   let pool = [...freshResumes];
+  let agentIndex = 0;
+
+  while (pool.length > 0) {
+    const agent = agents[agentIndex];
+    if (buckets[agent.name].length < leadsPerAgent) {
+      buckets[agent.name].push(pool.shift());
+    }
+    agentIndex = (agentIndex + 1) % agents.length;
+    const allFull = agents.every(a => buckets[a.name].length >= leadsPerAgent);
+    if (allFull) break;
+  }
+
   for (const agent of agents) {
-    const batch = pool.splice(0, leadsPerAgent);
+    const batch = buckets[agent.name];
     if (!batch.length) {
       await appendLog({ task: 'Resume distribution skipped', target: `${agent.name} — pool exhausted`, status: 'alert' }).catch(() => {});
       console.warn(`[Worker] ${agent.name}: skipped — pool exhausted`);
