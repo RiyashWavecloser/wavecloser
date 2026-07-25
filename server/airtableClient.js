@@ -1442,13 +1442,13 @@ export async function getResumeLeadsByAgent(agentName, date) {
   if (!isConfigured()) return [];
   try {
     const formulas = [`{AssignedTo} = "${agentName}"`];
-    if (date) formulas.push(`{AssignedDate} = "${date}"`);
+    if (date) formulas.push(`DATETIME_FORMAT({AssignedDate}, 'YYYY-MM-DD') = "${date}"`);
     const formula = formulas.length > 1 ? `AND(${formulas.join(',')})` : formulas[0];
     const records = await retry(() =>
       base()('ResumeLeads')
         .select({
           filterByFormula: formula,
-          sort: [{ field: 'CreatedAt', direction: 'asc' }],
+          sort: [{ field: 'CreatedAt', direction: 'desc' }],
         })
         .all()
     );

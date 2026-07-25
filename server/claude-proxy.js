@@ -1150,9 +1150,10 @@ async function fetchViaRSS(citySlug, keywords, limit) {
 app.get('/api/resume-leads/my-leads', requireResumeAccess, async (req, res) => {
   try {
     const { name } = req.user;
-    const today = new Date().toISOString().slice(0, 10);
-    const leads = await getResumeLeadsByAgent(name, today);
-    res.json({ leads, agent: name, date: today });
+    const { date } = req.query;
+    const dateFilter = date || null; // null returns all assigned leads for agent
+    const leads = await getResumeLeadsByAgent(name, dateFilter);
+    res.json({ leads, agent: name, date: dateFilter });
   } catch (err) {
     console.error('[proxy] GET /api/resume-leads/my-leads:', err.message);
     res.status(500).json({ error: err.message });
