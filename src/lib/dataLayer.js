@@ -86,7 +86,15 @@ async function post(path, body) {
     setSession(null);
     window.location.reload();
   }
-  if (!res.ok) throw new Error(`POST ${path} → ${res.status}`);
+  if (!res.ok) {
+    // Try to surface the server error message
+    let msg = `POST ${path} → ${res.status}`;
+    try {
+      const body = await res.clone().json();
+      if (body?.error) msg = body.error;
+    } catch {}
+    throw new Error(msg);
+  }
   return res.json();
 }
 
@@ -548,15 +556,150 @@ export async function searchCraigslistResumesAPI(city, keywords) {
     }
     if (!res.ok) {
       const body = await res.text().catch(() => res.statusText);
-      console.error(`[Craigslist] Backend error ${res.status}:`, body.slice(0, 300));
-      throw new Error(`Backend ${res.status}: ${body.slice(0, 100)}`);
+      let errorMsg = body;
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed.error) errorMsg = parsed.error;
+      } catch {}
+      throw new Error(errorMsg);
     }
     const data = await res.json();
     console.log('[Craigslist] Backend response:', data?.results?.length, 'results, demo:', data?.demo);
     return data;
   } catch (err) {
-    console.error('[Craigslist] API call failed, showing demo data:', err.message);
-    return { demo: true, results: DEMO_CRAIGSLIST_RESULTS };
+    console.error('[Craigslist] API call failed:', err.message);
+    const isNetworkError = err.message.toLowerCase().includes('failed to fetch') ||
+                           err.message.toLowerCase().includes('network error') ||
+                           err.message.toLowerCase().includes('unreachable');
+    if (isNetworkError) {
+      return { demo: true, results: DEMO_CRAIGSLIST_RESULTS };
+    }
+    throw err;
   }
 }
 
+// ─── Resume Lead Distribution API (Workflow C) ──────────────────────────────
+
+/**
+ * Fetch today's resume leads for the logged-in recruiting agent.
+ */
+export async function fetchMyResumeLeads() {
+  try {
+    return await get('/api/resume-leads/my-leads');
+  } catch {
+    return { leads: [], demo: true };
+  }
+}
+
+/**
+ * Update status and/or outreach notes for a resume lead.
+ */
+export async function updateResumeLeadAPI(id, status, notes) {
+  try {
+    return await patch(`/api/resume-leads/${encodeURIComponent(id)}/status`, { status, notes });
+  } catch {
+    return { demo: true };
+  }
+}
+
+/**
+ * Fetch performance stats — per-agent breakdown + market breakdown + dedup count.
+ */
+export async function fetchResumeLeadStats(filters = {}) {
+  try {
+    const params = new URLSearchParams();
+    if (filters.date)   params.set('date',   filters.date);
+    if (filters.market) params.set('market', filters.market);
+    if (filters.agent)  params.set('agent',  filters.agent);
+    const qs = params.toString();
+    return await get(`/api/resume-leads/stats${qs ? `?${qs}` : ''}`);
+  } catch {
+    return { agents: [], markets: [], totals: {}, dedupCount: 0, demo: true };
+  }
+}
+
+/**
+ * Trigger an immediate resume distribution run.
+ * Admin specifies cities (array of slugs), keywords, and leadsPerAgent.
+ */
+export async function triggerResumeDistribution({ cities, keywords, leadsPerAgent }) {
+  try {
+    return await post('/api/resume-leads/distribute-now', { cities, keywords, leadsPerAgent });
+  } catch {
+    return { demo: true };
+  }
+}
+
+/**
+ * Fetch deduplication stats — total permanently locked URLs.
+ */
+export async function fetchDedupStats() {
+  try {
+    return await get('/api/resume-leads/dedup-stats');
+  } catch {
+    return { totalLocked: 0, demo: true };
+  }
+}
+
+/**
+ * Fetch the list of available Craigslist cities from the server.
+ * Each item: { slug, label }
+ */
+export async function fetchAvailableCities() {
+  try {
+    const data = await get('/api/resume-leads/available-cities');
+    return data.cities || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetch the list of active recruiting agents (for the bulk-assign dropdown).
+ */
+export async function fetchRecruitingAgents() {
+  try {
+    const data = await get('/api/resume-leads/recruiting-agents');
+    return data.agents || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Bulk-assign selected Craigslist results to a specific agent.
+ */
+export async function bulkAssignResumeLeadsAPI(resumes, agentName, market) {
+  try {
+    return await post('/api/resume-leads/bulk-assign', { resumes, agentName, market });
+  } catch {
+    return { assigned: 0, skipped: 0, demo: true };
+  }
+}
+
+export async function bulkAssignResumes({ city, keywords, agentNames, countPerAgent }) {
+  if (!PROXY) {
+    // Demo mode — simulate result
+    await new Promise(r => setTimeout(r, 2000));
+    return {
+      success: true,
+      totalAssigned: agentNames.length * countPerAgent,
+      freshFound: agentNames.length * countPerAgent,
+      totalFound: agentNames.length * countPerAgent + 10,
+      summary: agentNames.map(name => ({ agent: name, assigned: countPerAgent })),
+    };
+  }
+  try {
+    const res = await fetch(`${PROXY}/api/resume-leads/bulk-assign`, {
+      method:  'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization:  `Bearer ${_token}`,
+      },
+      body: JSON.stringify({ city, keywords, agentNames, countPerAgent }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { success: false, message: e.message };
+  }
+}

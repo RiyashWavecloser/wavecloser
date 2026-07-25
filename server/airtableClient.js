@@ -14,6 +14,7 @@
 import Airtable from 'airtable';
 import dotenv from 'dotenv';
 import { sendEmail, buildRecruiterLeadEmail } from './emailService.js';
+import { RECRUITING_AGENTS } from './constants.js';
 dotenv.config();
 
 const API_KEY = process.env.AIRTABLE_API_KEY;
@@ -1309,3 +1310,366 @@ export async function deleteRecruit(id) {
     return null;
   }
 }
+
+// ─── Resume Lead Distribution (Workflow C) ─────────────────────────────────────
+// Tables: ResumeLeads, ResumeDeduplicationRegistry
+// Both tables must be created manually in Airtable before use.
+
+/**
+ * Fetch all staff records (for dynamic agent discovery by automationWorker).
+ */
+export async function getAllStaff() {
+  if (!isConfigured()) return [];
+  try {
+    const records = await retry(() =>
+      base()('Staff').select({ view: 'Grid view' }).all()
+    );
+    return records.map(r => ({
+      _airtableId:        r.id,
+      email:              r.get('Email')  || '',
+      name:               r.get('Name')   || '',
+      role:               r.get('Role')   || '',
+      active:             r.get('Active') !== false, // treat undefined as active
+      mustChangePassword: !!r.get('MustChangePassword'),
+    }));
+  } catch (err) {
+    console.warn('[airtable] getAllStaff error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Returns staff who receive and can be assigned resume leads.
+ * Strictly limited to the confirmed 9 recruiting agents:
+ * Janina, John M, Giana, Julius B, Karen M, Jemelyn, Manilyn, Melanie, April S.
+ */
+export async function getRecruitingAgents() {
+  return RECRUITING_AGENTS;
+}
+
+
+/**
+ * Fetch all CraigslistURLs ever assigned — returns a Set.
+ * This is the global permanent dedup registry. Check BEFORE assigning any resume.
+ */
+export async function getGlobalResumeDeduplicationSet() {
+  if (!isConfigured()) return new Set();
+  try {
+    const records = await retry(() =>
+      base()('ResumeDeduplicationRegistry')
+        .select({ fields: ['CraigslistURL'] })
+        .all()
+    );
+    const set = new Set();
+    records.forEach(r => {
+      const url = r.get('CraigslistURL');
+      if (url) set.add(url.trim().toLowerCase());
+    });
+    console.log(`[Dedup] ${set.size} resume URLs permanently locked`);
+    return set;
+  } catch (err) {
+    console.warn('[airtable] getGlobalResumeDeduplicationSet error:', err.message);
+    return new Set();
+  }
+}
+
+/**
+ * Permanently register a resume URL as assigned.
+ * Once a URL is here, it can NEVER be assigned to anyone again.
+ */
+export async function registerResumeAsAssigned(url, assignedTo, assignedDate) {
+  if (!isConfigured()) return;
+  try {
+    await retry(() =>
+      base()('ResumeDeduplicationRegistry').create({
+        CraigslistURL: url.trim().toLowerCase(),
+        FirstSeenAt:   new Date().toISOString(),
+        AssignedTo:    assignedTo || '',
+        AssignedDate:  assignedDate || new Date().toISOString().slice(0, 10),
+      })
+    );
+  } catch (err) {
+    console.warn('[airtable] registerResumeAsAssigned error:', err.message);
+  }
+}
+
+/**
+ * Save a single resume lead to the ResumeLeads working list.
+ */
+export async function saveResumeLead(data) {
+  if (!isConfigured()) return null;
+  try {
+    const rec = await retry(() =>
+      base()('ResumeLeads').create({
+        Title:         data.title         || '',
+        Description:   data.description   || '',
+        Phone:         data.phone         || '',
+        Email:         data.email         || '',
+        CraigslistURL: data.craigslistUrl || '',
+        Market:        data.market        || '',
+        AssignedTo:    data.assignedTo    || '',
+        AssignedDate:  data.assignedDate  || new Date().toISOString().slice(0, 10),
+        Status:        'New',
+        CreatedAt:     new Date().toISOString(),
+      })
+    );
+    return {
+      id:            rec.id,
+      title:         rec.get('Title')         || '',
+      description:   rec.get('Description')   || '',
+      phone:         rec.get('Phone')         || '',
+      email:         rec.get('Email')         || '',
+      craigslistUrl: rec.get('CraigslistURL') || '',
+      market:        rec.get('Market')        || '',
+      assignedTo:    rec.get('AssignedTo')    || '',
+      assignedDate:  rec.get('AssignedDate')  || '',
+      status:        rec.get('Status')        || 'New',
+      outreachNotes: '',
+      contactedAt:   '',
+      createdAt:     rec.get('CreatedAt')     || '',
+    };
+  } catch (err) {
+    console.warn('[airtable] saveResumeLead error:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Get all resume leads assigned to a specific agent for a specific date.
+ * If date is null, returns all leads for the agent.
+ */
+export async function getResumeLeadsByAgent(agentName, date) {
+  if (!isConfigured()) return [];
+  try {
+    const formulas = [`{AssignedTo} = "${agentName}"`];
+    if (date) formulas.push(`{AssignedDate} = "${date}"`);
+    const formula = formulas.length > 1 ? `AND(${formulas.join(',')})` : formulas[0];
+    const records = await retry(() =>
+      base()('ResumeLeads')
+        .select({
+          filterByFormula: formula,
+          sort: [{ field: 'CreatedAt', direction: 'asc' }],
+        })
+        .all()
+    );
+    return records.map(r => ({
+      id:            r.id,
+      title:         r.get('Title')         || '',
+      description:   r.get('Description')   || '',
+      phone:         r.get('Phone')         || '',
+      email:         r.get('Email')         || '',
+      craigslistUrl: r.get('CraigslistURL') || '',
+      market:        r.get('Market')        || '',
+      assignedTo:    r.get('AssignedTo')    || '',
+      assignedDate:  r.get('AssignedDate')  || '',
+      status:        r.get('Status')        || 'New',
+      outreachNotes: r.get('OutreachNotes') || '',
+      contactedAt:   r.get('ContactedAt')   || '',
+      createdAt:     r.get('CreatedAt')     || '',
+    }));
+  } catch (err) {
+    console.warn('[airtable] getResumeLeadsByAgent error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Update status and/or outreach notes for a single resume lead.
+ */
+export async function updateResumeLeadStatus(id, status, notes) {
+  if (!isConfigured()) return null;
+  try {
+    const fields = {};
+    if (status !== undefined) fields.Status = status;
+    if (notes  !== undefined) fields.OutreachNotes = notes;
+    const CONTACTED = ['Contacted', 'Interested', 'NotInterested', 'NoAnswer', 'Callback'];
+    if (status && CONTACTED.includes(status)) {
+      fields.ContactedAt = new Date().toISOString();
+    }
+    const rec = await retry(() => base()('ResumeLeads').update(id, fields));
+    return {
+      id:            rec.id,
+      title:         rec.get('Title')         || '',
+      description:   rec.get('Description')   || '',
+      phone:         rec.get('Phone')         || '',
+      email:         rec.get('Email')         || '',
+      craigslistUrl: rec.get('CraigslistURL') || '',
+      market:        rec.get('Market')        || '',
+      assignedTo:    rec.get('AssignedTo')    || '',
+      assignedDate:  rec.get('AssignedDate')  || '',
+      status:        rec.get('Status')        || 'New',
+      outreachNotes: rec.get('OutreachNotes') || '',
+      contactedAt:   rec.get('ContactedAt')   || '',
+      createdAt:     rec.get('CreatedAt')     || '',
+    };
+  } catch (err) {
+    console.warn('[airtable] updateResumeLeadStatus error:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Aggregate stats across all resume leads.
+ * Optional filters: dateFilter (YYYY-MM-DD), marketFilter (string), agentFilter (name).
+ */
+export async function getResumeLeadStats({ dateFilter, marketFilter, agentFilter } = {}) {
+  if (!isConfigured()) return { agents: [], markets: [], totals: {}, dedupCount: 0 };
+  try {
+    const formulas = [];
+    if (dateFilter)   formulas.push(`{AssignedDate} = "${dateFilter}"`);
+    if (marketFilter) formulas.push(`{Market} = "${marketFilter}"`);
+    if (agentFilter)  formulas.push(`{AssignedTo} = "${agentFilter}"`);
+    const formula = formulas.length > 0
+      ? (formulas.length === 1 ? formulas[0] : `AND(${formulas.join(',')})`)
+      : '';
+
+    const [leadRecs, dedupRecs] = await Promise.all([
+      retry(() => base()('ResumeLeads').select(formula ? { filterByFormula: formula } : {}).all()),
+      retry(() => base()('ResumeDeduplicationRegistry').select({ fields: ['CraigslistURL'] }).all()),
+    ]);
+
+    const leadDetails = leadRecs.map(r => ({
+      id:            r.id,
+      title:         r.get('Title')         || '',
+      description:   r.get('Description')   || '',
+      phone:         r.get('Phone')         || '',
+      email:         r.get('Email')         || '',
+      craigslistUrl: r.get('CraigslistURL') || '',
+      market:        r.get('Market')        || 'Unknown',
+      assignedTo:    r.get('AssignedTo')    || 'Unknown',
+      assignedDate:  r.get('AssignedDate')  || '',
+      status:        r.get('Status')        || 'New',
+      outreachNotes: r.get('OutreachNotes') || '',
+    }));
+
+    // Filter leadDetails to strictly include confirmed recruiting agents
+    const confirmedLeadDetails = leadDetails.filter(l => {
+      const assigned = (l.assignedTo || '').trim().toLowerCase();
+      if (!assigned || assigned === 'unknown' || assigned.includes('test') || assigned.includes('recruiter') || assigned === 'aureliab') {
+        return false;
+      }
+      return RECRUITING_AGENTS.some(a => a.name.toLowerCase() === assigned || a.email.toLowerCase() === assigned);
+    });
+
+    // Initialize agentMap for all 9 confirmed agents
+    const agentMap = {};
+    for (const agentObj of RECRUITING_AGENTS) {
+      agentMap[agentObj.name] = { agent: agentObj.name, assigned: 0, contacted: 0, interested: 0 };
+    }
+
+    for (const l of confirmedLeadDetails) {
+      const matched = RECRUITING_AGENTS.find(
+        a => a.name.toLowerCase() === l.assignedTo.trim().toLowerCase() || a.email.toLowerCase() === l.assignedTo.trim().toLowerCase()
+      );
+      if (matched) {
+        const name = matched.name;
+        agentMap[name].assigned++;
+        if (l.status !== 'New') agentMap[name].contacted++;
+        if (l.status === 'Interested') agentMap[name].interested++;
+      }
+    }
+
+    const agents = RECRUITING_AGENTS.map(agentObj => {
+      const a = agentMap[agentObj.name];
+      return {
+        ...a,
+        rate: a.assigned > 0 ? ((a.interested / a.assigned) * 100).toFixed(1) : '0.0',
+      };
+    });
+
+    // Per-market aggregation
+    const marketMap = {};
+    for (const l of confirmedLeadDetails) {
+      const m = l.market;
+      if (!marketMap[m]) marketMap[m] = { market: m, assigned: 0, interested: 0 };
+      marketMap[m].assigned++;
+      if (l.status === 'Interested') marketMap[m].interested++;
+    }
+    const markets = Object.values(marketMap);
+
+    const totalAssigned   = confirmedLeadDetails.length;
+    const totalContacted  = confirmedLeadDetails.filter(l => l.status !== 'New').length;
+    const totalInterested = confirmedLeadDetails.filter(l => l.status === 'Interested').length;
+
+    return {
+      agents,
+      markets,
+      leadDetails: confirmedLeadDetails,
+      totals: {
+        assigned:   totalAssigned,
+        contacted:  totalContacted,
+        interested: totalInterested,
+        rate: totalAssigned > 0 ? ((totalInterested / totalAssigned) * 100).toFixed(1) : '0.0',
+      },
+      dedupCount: dedupRecs.length,
+    };
+  } catch (err) {
+    console.warn('[airtable] getResumeLeadStats error:', err.message);
+    return { agents: [], markets: [], leadDetails: [], totals: {}, dedupCount: 0 };
+  }
+}
+
+/**
+ * Bulk-assign an array of Craigslist resume results to a specific agent.
+ * Skips any URL already in the global dedup registry.
+ * Registers each assigned URL permanently in the dedup registry.
+ * Returns { assigned: number, skipped: number }.
+ */
+export async function bulkAssignResumeLeads(resumes, agentName, market) {
+  if (!isConfigured()) return { assigned: 0, skipped: 0, demo: true };
+  const today = new Date().toISOString().slice(0, 10);
+
+  const globalDedupeSet = await getGlobalResumeDeduplicationSet();
+  let assigned = 0;
+  let skipped  = 0;
+
+  for (const resume of resumes) {
+    const url = (resume.link || resume.craigslistUrl || '').trim().toLowerCase();
+    if (!url || globalDedupeSet.has(url)) {
+      skipped++;
+      continue;
+    }
+
+    await saveResumeLead({
+      title:         resume.title,
+      description:   resume.description,
+      phone:         resume.phone || '',
+      email:         resume.email || '',
+      craigslistUrl: url,
+      market:        market || resume.market || '',
+      assignedTo:    agentName,
+      assignedDate:  today,
+    });
+
+    await registerResumeAsAssigned(url, agentName, today);
+    globalDedupeSet.add(url); // prevent duplicates within this batch
+    assigned++;
+  }
+
+  return { assigned, skipped };
+}
+
+/**
+ * Verify that ResumeLeads and ResumeDeduplicationRegistry tables exist.
+ * Logs a clear warning if they do not, but does not crash.
+ */
+export async function verifyAirtableTables() {
+  if (!isConfigured()) {
+    console.warn('[airtable] Airtable is not configured. Skipping table verification.');
+    return;
+  }
+  try {
+    await retry(() => base()('ResumeLeads').select({ maxRecords: 1 }).all());
+    console.log('[airtable] ✓ ResumeLeads table verified');
+  } catch (err) {
+    console.warn(`[airtable] ⚠️ WARNING: ResumeLeads table verification failed: ${err.message}. Please verify the table exists in your Airtable base.`);
+  }
+
+  try {
+    await retry(() => base()('ResumeDeduplicationRegistry').select({ maxRecords: 1 }).all());
+    console.log('[airtable] ✓ ResumeDeduplicationRegistry table verified');
+  } catch (err) {
+    console.warn(`[airtable] ⚠️ WARNING: ResumeDeduplicationRegistry table verification failed: ${err.message}. Please verify the table exists in your Airtable base.`);
+  }
+}
+

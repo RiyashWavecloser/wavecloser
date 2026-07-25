@@ -7,10 +7,13 @@ import {
   updateLeadAPI,
   loadLeadsFromStorage,
   saveLeadsToStorage,
+  fetchMyResumeLeads,
 } from '../lib/dataLayer.js';
 import RecruitingPipelineView from '../components/RecruitingPipelineView.jsx';
+import ResumeLeadsTab from '../components/ResumeLeadsTab.jsx';
 
-const IS_SUPERVISOR_ROLE = 'agent_supervisor';
+const IS_SUPERVISOR_ROLE  = 'agent_supervisor';
+const IS_RECRUITER_ROLE   = 'wave_closer_recruiter';
 
 // Helper to get the Monday of the current week (same logic as backend)
 const getMondayOfCurrentWeek = () => {
@@ -33,25 +36,29 @@ export default function AgentPortal({ currentUser, onLogout }) {
 
   // Role-aware portal label
   const portalLabel = {
-    cold_caller:         'Cold Caller Portal',
-    independent_rep:     'Independent Rep Portal',
-    authorized_reseller: 'Authorized Reseller Portal',
-    iso_investor:        'ISO Investor Portal',
-    referral_partner:    'Referral Partner Portal',
-    agent_supervisor:    'Supervisor View',
+    cold_caller:           'Cold Caller Portal',
+    independent_rep:       'Independent Rep Portal',
+    authorized_reseller:   'Authorized Reseller Portal',
+    iso_investor:          'ISO Investor Portal',
+    referral_partner:      'Referral Partner Portal',
+    agent_supervisor:      'Supervisor View',
+    wave_closer_recruiter: 'Recruiter Portal',
   }[currentUser?.role] || 'Agent Portal';
+
+  const isWCRecruiter = currentUser?.role === IS_RECRUITER_ROLE;
 
   // Priority badge — only for Authorized Resellers
   const showPriorityBadge = currentUser?.role === 'authorized_reseller';
 
   // ─── State ─────────────────────────────────────────────────────────────────
   const [leads, setLeads] = useState([]);
+  const [resumeLeads, setResumeLeads] = useState([]);
   const [filter, setFilter] = useState('uncalled');
   const [search, setSearch] = useState('');
   const [toast, setToast] = useState(null);
   const [isDemo, setIsDemo] = useState(true);
-  // 'assigned' | 'generate' | 'history'
-  const [activeTab, setActiveTab] = useState('assigned');
+  // 'assigned' | 'generate' | 'history' | 'resume-leads'
+  const [activeTab, setActiveTab] = useState(isWCRecruiter ? 'resume-leads' : 'assigned');
   const [subPortal, setSubPortal] = useState('sales'); // 'sales' | 'recruiting'
 
   // Supervisor state
@@ -106,6 +113,22 @@ export default function AgentPortal({ currentUser, onLogout }) {
   useEffect(() => {
     if (isSupervisor) loadMyLeads();
   }, [supervisorAgent]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When Recruiting tab is opened — fetch today's resume leads for this agent
+  useEffect(() => {
+    if (activeTab === 'recruiting') {
+      loadMyResumeLeads();
+      const interval = setInterval(loadMyResumeLeads, 15000);
+      return () => clearInterval(interval);
+    }
+  }, [activeTab]);
+
+  async function loadMyResumeLeads() {
+    const result = await fetchMyResumeLeads(); // calls GET /api/resume-leads/my-leads
+    if (result && !result.error) {
+      setResumeLeads(result.leads || []);
+    }
+  }
 
   // ─── Toast ──────────────────────────────────────────────────────────────────
   function showToast(msg, type = 'success') {
@@ -403,7 +426,7 @@ export default function AgentPortal({ currentUser, onLogout }) {
       {/* Sub-portal Toggle Navigation */}
       <div style={{ display: 'flex', background: '#EAECEF', borderRadius: 8, padding: 4, margin: '14px 20px 8px 20px' }}>
         <button
-          onClick={() => setSubPortal('sales')}
+          onClick={() => { setSubPortal('sales'); setActiveTab('assigned'); }}
           style={{
             flex: 1,
             background: subPortal === 'sales' ? '#1F4E79' : 'transparent',
@@ -420,7 +443,7 @@ export default function AgentPortal({ currentUser, onLogout }) {
           💼 Sales Leads
         </button>
         <button
-          onClick={() => setSubPortal('recruiting')}
+          onClick={() => { setSubPortal('recruiting'); setActiveTab('recruiting'); }}
           style={{
             flex: 1,
             background: subPortal === 'recruiting' ? '#1F4E79' : 'transparent',
@@ -512,10 +535,24 @@ export default function AgentPortal({ currentUser, onLogout }) {
         >
           📖 History{historyList.length > 0 ? ` (${historyList.length})` : ''}
         </button>
+        {/* Resume Leads tab — wave_closer_recruiter only */}
+        {isWCRecruiter && (
+          <button
+            id="tab-resume-leads" onClick={() => setActiveTab('resume-leads')}
+            style={{ ...S.tabBtn, ...(activeTab === 'resume-leads' ? S.tabBtnActive : {}) }}
+          >
+            📋 Resume Leads
+          </button>
+        )}
       </div>
 
       {/* Tab: Generate My Own Leads */}
       {activeTab === 'generate' && !isSupervisor && renderGenerateTab()}
+
+      {/* Tab: Resume Leads (wave_closer_recruiter) */}
+      {activeTab === 'resume-leads' && isWCRecruiter && (
+        <ResumeLeadsTab currentUser={currentUser} />
+      )}
 
       {/* Tab: History */}
       {activeTab === 'history' && (
@@ -594,7 +631,11 @@ export default function AgentPortal({ currentUser, onLogout }) {
         </>
       ) : (
         <div style={{ padding: '0 20px' }}>
-          <RecruitingPipelineView currentUser={currentUser} />
+          {isSupervisor ? (
+            <RecruitingPipelineView currentUser={currentUser} />
+          ) : (
+            <ResumeLeadsTab currentUser={currentUser} />
+          )}
         </div>
       )}
 

@@ -30,6 +30,10 @@ import {
   assignLeadsToAgent,
   getMondayOfCurrentWeek,
   listAgents,
+  // Resume Lead Distribution (Workflow C)
+  getRecruitingAgents,
+  getGlobalResumeDeduplicationSet,
+  bulkAssignResumeLeads,
 } from './airtableClient.js';
 import {
   sendEmail,
@@ -41,13 +45,14 @@ import {
   buildLearningEnrollmentEmail,
   buildTrainingInviteEmail,
 } from './emailService.js';
-import { BENCHMARKS, WEEKLY_LEADS_PER_AGENT, NUM_AGENTS, AGENTS } from './constants.js';
+import { BENCHMARKS, WEEKLY_LEADS_PER_AGENT, NUM_AGENTS, AGENTS, CITY_SUBDOMAINS, DAILY_RESUME_LEADS_PER_WCR, RESUME_SEARCH_KEYWORDS } from './constants.js';
 import { generateLeads } from './leadWorker.js';
 
 dotenv.config();
 
-const TEST_MODE   = process.argv.includes('--test-mode');
-const CLAUDE_KEY  = process.env.ANTHROPIC_API_KEY;
+const TEST_MODE    = process.argv.includes('--test-mode');
+const CLAUDE_KEY   = process.env.ANTHROPIC_API_KEY;
+const APIFY_KEY    = process.env.APIFY_API_KEY;
 const RESEND_READY = !!process.env.RESEND_API_KEY;
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
@@ -491,9 +496,224 @@ if (!TEST_MODE) {
     await runQuotaChecks(users).catch(console.error);
   });
 
+  // ─── Resume Distribution Cron ────────────────────────────────────────────────
+  // Runs at Philippines shift start (default: 8PM UTC = 8AM Philippines time).
+  // Cities are set by admin via RESUME_SEARCH_CITIES env var (comma-separated slugs).
+  // Set RESUME_SEARCH_CITIES to a comma-separated list of city slugs from CITY_SUBDOMAINS.
+  // Example: RESUME_SEARCH_CITIES=newyork,newjersey,brooklyn,miami
+  const resumeCron = process.env.PHILIPPINES_SHIFT_UTC || '0 20 * * *';
+  cron.schedule(resumeCron, async () => {
+    console.log('[Worker] ⏰ Daily resume lead distribution starting...');
+    await distributeResumeLeads().catch(err => {
+      console.error('[Worker] Resume distribution error:', err.message);
+    });
+  });
+  console.log(`[worker] ✓ Resume distribution cron scheduled: ${resumeCron}`);
+  console.log(`[worker]   Cities: ${process.env.RESUME_SEARCH_CITIES || '(none set — set RESUME_SEARCH_CITIES env var)'}`);
+
   // Poll every 60 seconds
   poll();
   setInterval(poll, 60_000);
+}
+
+// ─── Resume Lead Distribution ─────────────────────────────────────────────────
+
+/**
+ * Inline Craigslist search for the automation worker.
+ * This is a copy of the function in claude-proxy.js — the worker cannot import
+ * from the Express app without creating a circular dependency.
+ */
+async function workerSearchCraigslist(citySlug, keywords, limit = 100) {
+  const searchUrl = `https://${citySlug}.craigslist.org/search/res?query=${encodeURIComponent(keywords)}`;
+
+  let apifyErrorMsg = null;
+
+  // Apify (preferred)
+  if (APIFY_KEY) {
+    try {
+      const apifyRes = await fetch(
+        'https://api.apify.com/v2/acts/solidcode~craigslist-scraper/run-sync-get-dataset-items?timeout=60&memory=512',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${APIFY_KEY}` },
+          body: JSON.stringify({ startUrls: [{ url: searchUrl }], maxItems: limit }),
+        }
+      );
+      if (apifyRes.ok) {
+        const data = await apifyRes.json();
+        const raw  = Array.isArray(data) ? data : [];
+        const items = raw.filter(r => r && r.title).slice(0, limit).map(r => {
+          const desc = r.description || r.postingBody || '';
+          const phoneFromDesc = desc.match(/\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}/)?.[0] || '';
+          const emailFromDesc = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0] || '';
+          return {
+            title:       r.title || '',
+            description: desc.slice(0, 500),
+            phone:       r.phone || phoneFromDesc || '',
+            email:       r.email || r.replyEmail  || emailFromDesc || '',
+            link:        r.url   || r.link        || '',
+            date:        r.postedAt || r.date     || '',
+          };
+        });
+        if (items.length > 0) return items;
+      } else {
+        const errText = await apifyRes.text().catch(() => apifyRes.statusText);
+        let parsed = errText;
+        try {
+          const parsedJson = JSON.parse(errText);
+          if (parsedJson?.error?.message) parsed = parsedJson.error.message;
+        } catch {}
+        apifyErrorMsg = `Apify error: ${parsed.slice(0, 150)}`;
+      }
+    } catch (e) {
+      apifyErrorMsg = `Apify exception: ${e.message}`;
+      console.warn(`[Worker Craigslist] Apify error for ${citySlug}:`, e.message);
+    }
+  } else {
+    apifyErrorMsg = 'Apify API key is not configured in .env';
+  }
+
+  // RSS fallback
+  try {
+    const rssUrl = `${searchUrl}&format=rss`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const fetchRes = await fetch(rssUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/rss+xml, text/xml, */*' },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (fetchRes.status === 403) {
+      throw new Error('403 Forbidden (Anti-bot block)');
+    }
+    if (!fetchRes.ok) {
+      throw new Error(`HTTP ${fetchRes.status}`);
+    }
+
+    const xml   = await fetchRes.text();
+    if (xml.includes('<title>blocked</title>') || xml.includes('blocked')) {
+      throw new Error('Request blocked by Craigslist anti-bot system');
+    }
+
+    const items = [];
+    const itemRx = /<item>([\s\S]*?)<\/item>/g;
+    let match;
+    while ((match = itemRx.exec(xml)) !== null && items.length < limit) {
+      const block = match[1];
+      const title = (block.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/)?.[1] || block.match(/<title>(.*?)<\/title>/)?.[1] || '').trim();
+      const desc  = (block.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/)?.[1] || block.match(/<description>(.*?)<\/description>/)?.[1] || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 500);
+      const link  = (block.match(/<link>(.*?)<\/link>/)?.[1] || block.match(/<guid[^>]*>(.*?)<\/guid>/)?.[1] || '').trim();
+      const phone = desc.match(/\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}/)?.[0] || '';
+      const email = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0] || '';
+      if (title) items.push({ title, description: desc, link, phone, email });
+    }
+    return items;
+  } catch (err) {
+    console.error(`[Worker Craigslist] RSS error for ${citySlug}:`, err.message);
+    const finalMsg = `Scraper error: ${apifyErrorMsg}. Fallback RSS failed: ${err.message}.`;
+    throw new Error(finalMsg);
+  }
+}
+
+/**
+ * Daily resume lead distribution.
+ *
+ * Cities to search come from the RESUME_SEARCH_CITIES env var (comma-separated slugs).
+ * This env var is set by the admin (William/Riyash) — NOT hardcoded anywhere.
+ *
+ * Can also be called directly via POST /api/resume-leads/distribute-now from the UI
+ * which lets the admin choose cities per run.
+ */
+async function distributeResumeLeads() {
+  if (!airtableReady()) {
+    console.log('[Worker] Airtable not configured — skipping resume distribution');
+    return;
+  }
+
+  // Step 1 — Read cities from env var (set by admin)
+  const citiesRaw = process.env.RESUME_SEARCH_CITIES || '';
+  if (!citiesRaw.trim()) {
+    console.warn('[Worker] RESUME_SEARCH_CITIES env var not set — skipping distribution');
+    console.warn('[Worker] Set RESUME_SEARCH_CITIES=newyork,newjersey,brooklyn (comma-separated slugs)');
+    await appendLog({
+      task:   'Resume distribution skipped',
+      target: 'RESUME_SEARCH_CITIES env var not configured — set it to enable automatic distribution',
+      status: 'alert',
+    }).catch(() => {});
+    return;
+  }
+  const cities = citiesRaw.split(',').map(c => c.trim().toLowerCase()).filter(Boolean);
+  const keywords  = RESUME_SEARCH_KEYWORDS;
+  const leadsPerAgent = DAILY_RESUME_LEADS_PER_WCR;
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Step 2 — Get all recruiting agents dynamically
+  const agents = await getRecruitingAgents();
+  console.log(`[Worker] ${agents.length} recruiting agents found`);
+  if (!agents.length) {
+    await appendLog({ task: 'Resume distribution skipped', target: 'No recruiting agents found in Staff table', status: 'alert' }).catch(() => {});
+    return;
+  }
+
+  // Step 3 — Load global dedup set FIRST
+  const globalDedupeSet = await getGlobalResumeDeduplicationSet();
+  console.log(`[Worker] ${globalDedupeSet.size} resume URLs permanently locked`);
+
+  // Step 4 — Fetch fresh resumes from each city
+  let freshResumes = [];
+  for (const citySlug of cities) {
+    try {
+      const results = await workerSearchCraigslist(citySlug, keywords, 100);
+      const newOnly  = results.filter(r => {
+        const url = (r.link || '').trim().toLowerCase();
+        return url && !globalDedupeSet.has(url);
+      });
+      freshResumes = [...freshResumes, ...newOnly.map(r => ({ ...r, market: CITY_SUBDOMAINS[citySlug] || citySlug }))];
+      console.log(`[Worker] ${citySlug}: ${results.length} found, ${newOnly.length} new`);
+    } catch (e) {
+      console.error(`[Worker] Failed ${citySlug}:`, e.message);
+    }
+  }
+
+  // Dedup within this batch
+  const seen = new Set();
+  freshResumes = freshResumes.filter(r => {
+    const url = (r.link || '').trim().toLowerCase();
+    if (seen.has(url)) return false;
+    seen.add(url);
+    return true;
+  });
+
+  const needed = agents.length * leadsPerAgent;
+  console.log(`[Worker] ${freshResumes.length} total fresh resumes — need ${needed}`);
+  if (freshResumes.length < needed) {
+    await appendLog({
+      task:   'Resume lead shortage warning',
+      target: `Only ${freshResumes.length} fresh resumes — need ${needed} for ${agents.length} agents across cities: ${cities.join(', ')}`,
+      status: 'alert',
+    }).catch(() => {});
+  }
+
+  // Step 5 — Assign leadsPerAgent leads to each agent sequentially
+  let pool = [...freshResumes];
+  for (const agent of agents) {
+    const batch = pool.splice(0, leadsPerAgent);
+    if (!batch.length) {
+      await appendLog({ task: 'Resume distribution skipped', target: `${agent.name} — pool exhausted`, status: 'alert' }).catch(() => {});
+      console.warn(`[Worker] ${agent.name}: skipped — pool exhausted`);
+      continue;
+    }
+    const result = await bulkAssignResumeLeads(batch, agent.name, '');
+    await appendLog({
+      task:   'Daily resume leads assigned',
+      target: `${agent.name} → ${result.assigned} leads (${result.skipped} skipped dedup) — ${today}`,
+      status: 'ok',
+    }).catch(() => {});
+    console.log(`[Worker] ${agent.name}: ${result.assigned} leads assigned`);
+  }
+
+  console.log('[Worker] Daily resume distribution complete');
 }
 
 // ─── Test mode ────────────────────────────────────────────────────────────────

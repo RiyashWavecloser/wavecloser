@@ -9,37 +9,39 @@
  */
 
 export const ROLES = {
-  ADMIN:                'admin',
-  PM:                   'pm',
-  SPONSOR:              'sponsor',
-  CX:                   'cx',
-  RECRUITER:            'recruiter',
-  MARKETER:             'marketer',
-  TRAINER:              'trainer',
-  COLD_CALLER:          'cold_caller',
-  INDEPENDENT_REP:      'independent_rep',
-  AUTHORIZED_RESELLER:  'authorized_reseller',
-  ISO_INVESTOR:         'iso_investor',
-  REFERRAL_PARTNER:     'referral_partner',
-  AGENT_SUPERVISOR:     'agent_supervisor',
-  AGENT:                'agent',
+  ADMIN:                  'admin',
+  PM:                     'pm',
+  SPONSOR:                'sponsor',
+  CX:                     'cx',
+  RECRUITER:              'recruiter',
+  MARKETER:               'marketer',
+  TRAINER:                'trainer',
+  COLD_CALLER:            'cold_caller',
+  INDEPENDENT_REP:        'independent_rep',
+  AUTHORIZED_RESELLER:    'authorized_reseller',
+  ISO_INVESTOR:           'iso_investor',
+  REFERRAL_PARTNER:       'referral_partner',
+  AGENT_SUPERVISOR:       'agent_supervisor',
+  AGENT:                  'agent',
+  WAVE_CLOSER_RECRUITER:  'wave_closer_recruiter',
 };
 
 export const ROLE_LABELS = {
-  admin:                'Project Manager',
-  pm:                   'Project Manager (PM)',
-  sponsor:              'Executive Sponsor',
-  cx:                   'Customer Experience (CX)',
-  recruiter:            'Recruiter / Franchise Sales',
-  marketer:             'Marketer',
-  trainer:              'Sales Trainer',
-  cold_caller:          'Cold Caller',
-  independent_rep:      'Independent Rep',
-  authorized_reseller:  'Authorized Reseller',
-  iso_investor:         'ISO Investor',
-  referral_partner:     'Referral Partner',
-  agent_supervisor:     'Agent Supervisor',
-  agent:                'Agent',
+  admin:                  'Project Manager',
+  pm:                     'Project Manager (PM)',
+  sponsor:                'Executive Sponsor',
+  cx:                     'Customer Experience (CX)',
+  recruiter:              'Recruiter / Franchise Sales',
+  marketer:               'Marketer',
+  trainer:                'Sales Trainer',
+  cold_caller:            'Cold Caller',
+  independent_rep:        'Independent Rep',
+  authorized_reseller:    'Authorized Reseller',
+  iso_investor:           'ISO Investor',
+  referral_partner:       'Referral Partner',
+  agent_supervisor:       'Agent Supervisor',
+  agent:                  'Agent',
+  wave_closer_recruiter:  'Wave Closer Recruiter',
 };
 
 // All agent-type roles — share the Agent Portal (Workflow A)
@@ -51,6 +53,7 @@ export const AGENT_ROLES = [
   'referral_partner',
   'agent_supervisor',
   'agent',
+  'wave_closer_recruiter',
 ];
 
 const FULL_ACCESS = [
@@ -61,19 +64,21 @@ const FULL_ACCESS = [
 export const ROLE_VIEWS = {
   admin:                FULL_ACCESS,
   pm:                   FULL_ACCESS,
-  sponsor:              ['dashboard', 'users', 'onboarding', 'automation', 'franchise', 'leads', 'settings'],
+  sponsor:              ['dashboard', 'users', 'onboarding', 'automation', 'franchise', 'leads', 'settings', 'recruiter-portal'],
   cx:                   ['qualifier-portal', 'users', 'onboarding', 'qualifier-completed'],
   recruiter:            ['dashboard', 'users', 'onboarding', 'recruiter-portal'],
   marketer:             ['dashboard', 'users', 'leads'],
   trainer:              ['dashboard', 'users', 'leads'],
   // All agent-type roles — single-view portal
-  cold_caller:          ['agent-portal'],
-  independent_rep:      ['agent-portal'],
-  authorized_reseller:  ['agent-portal'],
-  iso_investor:         ['agent-portal'],
-  referral_partner:     ['agent-portal'],
-  agent_supervisor:     ['agent-portal'],
-  agent:                ['agent-portal'],
+  cold_caller:            ['agent-portal'],
+  independent_rep:        ['agent-portal'],
+  authorized_reseller:    ['agent-portal'],
+  iso_investor:           ['agent-portal'],
+  referral_partner:       ['agent-portal'],
+  agent_supervisor:       ['agent-portal'],
+  agent:                  ['agent-portal'],
+  // Wave Closer Recruiter — gets agent portal (with resume leads tab) + recruiting pipeline
+  wave_closer_recruiter:  ['agent-portal'],
 };
 
 export const ROLE_USER_FILTER = {

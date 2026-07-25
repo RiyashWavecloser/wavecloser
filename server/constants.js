@@ -98,3 +98,58 @@ export const BUSINESS_TYPES = [
 export const LEAD_STATUSES = [
   'New', 'Assigned', 'Called', 'Interested', 'NotInterested', 'Callback', 'NoAnswer',
 ];
+
+// ─── Resume Lead Distribution (Workflow C) ────────────────────────────────────
+
+/**
+ * Number of Craigslist resume leads assigned to each recruiting agent per day.
+ * Override with DAILY_RESUME_LEADS_PER_WCR env var.
+ */
+export const DAILY_RESUME_LEADS_PER_WCR = Number(process.env.DAILY_RESUME_LEADS_PER_WCR || 20);
+
+/**
+ * Default Craigslist resume search keywords.
+ * Override with RESUME_SEARCH_KEYWORDS env var.
+ */
+export const RESUME_SEARCH_KEYWORDS = process.env.RESUME_SEARCH_KEYWORDS || 'sales';
+
+/**
+ * Staff roles that receive daily resume leads.
+ * Any active staff account with one of these roles gets 20 leads/day.
+ */
+export const RECRUITING_ROLES = ['wave_closer_recruiter', 'recruiter'];
+
+/**
+ * All supported Craigslist city slugs — used to populate city pickers in the UI.
+ * Cities to SEARCH are chosen by the admin/task-assigner, not hardcoded.
+ * For the automated daily cron, set RESUME_SEARCH_CITIES env var (comma-separated slugs).
+ */
+export const CITY_SUBDOMAINS = {
+  newyork:        'New York (Metro)',
+  newjersey:      'New Jersey',
+  hartford:       'Connecticut / Hartford',
+  philadelphia:   'Philadelphia, PA',
+  boston:         'Boston, MA',
+  miami:          'Miami / South FL',
+  orlando:        'Orlando, FL',
+  chicago:        'Chicago, IL',
+  losangeles:     'Los Angeles, CA',
+  houston:        'Houston, TX',
+  dallas:         'Dallas, TX',
+  atlanta:        'Atlanta, GA',
+  phoenix:        'Phoenix, AZ',
+};
+
+export const RECRUITING_AGENTS = [
+  { name: 'Janina',    email: 'janina@waveclosers.com'   },
+  { name: 'John M',    email: 'johnm@waveclosers.com'    },
+  { name: 'Giana',     email: 'giana@waveclosers.com'    },
+  { name: 'Julius B',  email: 'juliusb@waveclosers.com'  },
+  { name: 'Karen M',   email: 'karenm@waveclosers.com'   },
+  { name: 'Jemelyn',   email: 'jemelyna@waveclosers.com' },
+  { name: 'Manilyn',   email: 'manilynp@waveclosers.com' },
+  { name: 'Melanie',   email: 'melaniea@waveclosers.com' },
+  { name: 'April S',   email: 'aprils@waveclosers.com'   },
+];
+
+

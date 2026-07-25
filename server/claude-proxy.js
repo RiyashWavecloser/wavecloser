@@ -51,6 +51,17 @@ import {
   updateRecruit,
   deleteRecruit,
   getRecruitById,
+  // Resume Lead Distribution (Workflow C)
+  getRecruitingAgents,
+  getGlobalResumeDeduplicationSet,
+  getResumeLeadsByAgent,
+  getResumeLeadsByAgent as getResumeLeadsByRecruiter,
+  updateResumeLeadStatus,
+  getResumeLeadStats,
+  bulkAssignResumeLeads,
+  saveResumeLead,
+  registerResumeAsAssigned,
+  verifyAirtableTables,
 } from './airtableClient.js';
 import { generateLeads } from './leadWorker.js';
 import {
@@ -61,7 +72,7 @@ import {
   buildPartnerLeadEmail,
 } from './emailService.js';
 import { requireAuth, signToken, verifyPassword, hashPassword, requireRole, authenticateAgent, authenticateSupervisor } from './auth.js';
-import { AGENTS } from './constants.js';
+import { AGENTS, CITY_SUBDOMAINS, DAILY_RESUME_LEADS_PER_WCR, RESUME_SEARCH_KEYWORDS } from './constants.js';
 
 dotenv.config();
 
@@ -806,12 +817,24 @@ app.post('/api/leads/:id/assign-partner', requireAuth, async (req, res) => {
 
 // ─── Recruiting Pipeline (Workflow B) ─────────────────────────────────────────
 
-// All recruiting endpoints require admin, pm, recruiter, or any agent role
+// All recruiting endpoints require admin, pm, recruiter, wave_closer_recruiter, or any agent role
 const requireRecruiterAccess = (req, res, next) =>
   requireAuth(req, res, () => requireRole(
-    'admin', 'pm', 'recruiter', 'agent',
+    'admin', 'pm', 'recruiter', 'wave_closer_recruiter', 'agent',
     'cold_caller', 'independent_rep', 'authorized_reseller',
     'iso_investor', 'referral_partner', 'agent_supervisor'
+  )(req, res, next));
+
+// Resume lead endpoints — recruiting agents + admins
+const requireResumeAccess = (req, res, next) =>
+  requireAuth(req, res, () => requireRole(
+    'admin', 'pm', 'sponsor', 'recruiter', 'wave_closer_recruiter', 'agent', 'cold_caller'
+  )(req, res, next));
+
+// Performance/stats + manual trigger — all admins and recruiter managers
+const requireResumeAdmin = (req, res, next) =>
+  requireAuth(req, res, () => requireRole(
+    'admin', 'pm', 'sponsor', 'recruiter', 'wave_closer_recruiter'
   )(req, res, next));
 
 // GET /api/recruiting — list all recruits (recruiter sees own; admin/pm see all)
@@ -915,145 +938,487 @@ app.get('/api/recruiting/:id', requireRecruiterAccess, async (req, res) => {
   }
 });
 
-// ─── Craigslist Resume Search ─────────────────────────────────────────────────
+// GET /api/resume-leads/craigslist-search
+// Query params: ?city=Newark NJ&keywords=sales commission&limit=50
 
-/**
- * Map our city slugs to the Craigslist subdomain used in the URL.
- */
-const CITY_SUBDOMAINS = {
-  newyork:      'newyork',
-  newjersey:    'newjersey',
-  newhaven:     'newhaven',
-  brooklyn:     'brooklyn',
-  queens:       'queens',
-  bronx:        'bronx',
-  statenisland: 'statenisland',
-  newark:       'newark',
-  jerseycity:   'jerseycity',
-  bridgeport:   'bridgeport',
-  hartford:     'hartford',
-  stamford:     'stamford',
-};
+app.get('/api/resume-leads/craigslist-search', async (req, res) => {
+  const city     = req.query.city     || 'newyork';
+  const keywords = req.query.keywords || 'sales commission cold calling';
+  const limit    = parseInt(req.query.limit) || 50;
 
-/**
- * Search Craigslist resumes via Apify (preferred) or direct RSS (fallback).
- * Apify gives more reliable results and bypasses Craigslist's bot-blocking.
- */
-async function searchCraigslistResumes(city, keywords, limit = 50) {
-  const citySlug = CITY_SUBDOMAINS[city] || city;
-  const searchUrl = `https://${citySlug}.craigslist.org/search/res?query=${encodeURIComponent(keywords)}`;
+  try {
+    const results = await searchCraigslistResumes(city, keywords, limit);
+    res.json({ results, total: results.length, city, keywords });
+  } catch (err) {
+    console.error('[Craigslist] search error:', err.message);
+    res.status(500).json({ error: err.message, results: [] });
+  }
+});
 
-  // -- Apify integration (when API key is configured) -------------------------
-  if (process.env.APIFY_API_KEY) {
+async function searchCraigslistResumes(cityInput, keywords, limit = 50) {
+  const citySlug = toCraigslistSlug(cityInput);
+
+  const APIFY_KEY = process.env.APIFY_API_KEY;
+  let apifyErrorMsg = null;
+
+  if (APIFY_KEY) {
     try {
-      console.log(`[Craigslist] Using Apify — city: ${citySlug}, keywords: ${keywords}`);
-
-      const apifyRes = await fetch(
-        'https://api.apify.com/v2/acts/solidcode~craigslist-scraper/run-sync-get-dataset-items?timeout=60&memory=512',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.APIFY_API_KEY}`,
-          },
-          body: JSON.stringify({
-            startUrls: [{ url: searchUrl }],
-            maxItems: limit,
-          }),
-        }
-      );
-
-      if (apifyRes.ok) {
-        const data = await apifyRes.json();
-        const raw = Array.isArray(data) ? data : [];
-        const items = raw
-          .filter(r => r && r.title)
-          .slice(0, limit)
-          .map(r => {
-            const desc = r.description || r.postingBody || '';
-            const phoneFromDesc = desc.match(/\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}/)?.[0] || '';
-            const phone = r.phone || (r.phoneNumbers && r.phoneNumbers[0]) || phoneFromDesc;
-            const emailFromDesc = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0] || '';
-            const email = r.email || r.replyEmail || r.contactEmail || emailFromDesc || '';
-            return {
-              title:       r.title                              || '',
-              description: desc.slice(0, 500),
-              phone:       phone                                || '',
-              email:       email                                || '',
-              date:        r.postedAt || r.updatedAt || r.time || r.date || '',
-              link:        r.url  || r.link                    || '',
-            };
-          });
-
-        console.log(`[Craigslist] Apify returned ${items.length} results`);
-        if (items.length > 0) return items;
-        console.warn('[Craigslist] Apify returned 0 results, falling back to RSS');
-      } else {
-        const errText = await apifyRes.text().catch(() => apifyRes.statusText);
-        console.warn(`[Craigslist] Apify HTTP ${apifyRes.status}: ${errText.slice(0, 300)}`);
-        console.warn('[Craigslist] Falling back to RSS');
-      }
-    } catch (apifyErr) {
-      console.warn('[Craigslist] Apify error, falling back to RSS:', apifyErr.message);
+      const results = await fetchViaApify(citySlug, keywords, limit, APIFY_KEY);
+      if (results.length > 0) return results;
+      apifyErrorMsg = 'Apify returned 0 results';
+    } catch (e) {
+      apifyErrorMsg = e.message;
+      console.warn('[Craigslist] Apify failed, falling back to RSS:', e.message);
     }
+  } else {
+    apifyErrorMsg = 'No APIFY_API_KEY configured';
   }
 
-
-  // ── Direct RSS scraping (free, no API key required) ────────────────────────
+  // RSS fallback — may also be blocked but try anyway
   try {
-    const rssUrl = `${searchUrl}&format=rss`;
-    console.log(`[Craigslist] RSS fetch: ${rssUrl}`);
-
-    const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 8000);
-
-    const fetchRes = await fetch(rssUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/rss+xml, text/xml, */*',
-      },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    const xml    = await fetchRes.text();
-    const items  = [];
-    const itemRx = /<item>([\s\S]*?)<\/item>/g;
-    let match;
-
-    while ((match = itemRx.exec(xml)) !== null && items.length < limit) {
-      const block = match[1];
-      const title = (
-        block.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/)?.[1] ||
-        block.match(/<title>(.*?)<\/title>/)?.[1] ||
-        ''
-      ).trim();
-      const desc  = (
-        block.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/)?.[1] ||
-        block.match(/<description>(.*?)<\/description>/)?.[1] ||
-        ''
-      ).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 500);
-      const link  = (
-        block.match(/<link>(.*?)<\/link>/)?.[1] ||
-        block.match(/<guid[^>]*>(.*?)<\/guid>/)?.[1] ||
-        ''
-      ).trim();
-      const date  = (block.match(/<pubDate>(.*?)<\/pubDate>/)?.[1] || '').trim();
-      const phone = desc.match(/\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}/)?.[0] || '';
-      const email = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0] || '';
-
-      if (title) {
-        items.push({ title, description: desc, link, date, phone, email });
-      }
-    }
-
-    console.log(`[Craigslist] RSS parsed ${items.length} results`);
-    return items;
-  } catch (err) {
-    console.error('[Craigslist] RSS search failed:', err.message);
-    return [];
+    return await fetchViaRSS(citySlug, keywords, limit);
+  } catch (rssErr) {
+    throw new Error(`Craigslist scraping failed. Apify: ${apifyErrorMsg}. RSS: ${rssErr.message}`);
   }
 }
+
+function toCraigslistSlug(cityInput) {
+  const input = cityInput.toLowerCase().trim()
+    .replace(/,/g, '').replace(/\s+/g, ' ');
+
+  const MAP = {
+    'new york':        'newyork',
+    'new york ny':     'newyork',
+    'nyc':             'newyork',
+    'brooklyn':        'newyork',
+    'queens':          'newyork',
+    'bronx':           'newyork',
+    'manhattan':       'newyork',
+    'staten island':   'newyork',
+    'new jersey':      'newjersey',
+    'new jersey nj':   'newjersey',
+    'nj':              'newjersey',
+    'newark':          'newjersey',
+    'newark nj':       'newjersey',
+    'jersey city':     'newjersey',
+    'jersey city nj':  'newjersey',
+    'connecticut':     'CT',
+    'connecticut ct':  'CT',
+    'ct':              'CT',
+    'hartford':        'hartford',
+    'hartford ct':     'hartford',
+    'stamford':        'newhavenct',
+    'miami':           'miami',
+    'miami fl':        'miami',
+    'houston':         'houston',
+    'houston tx':      'houston',
+    'atlanta':         'atlanta',
+    'atlanta ga':      'atlanta',
+    'chicago':         'chicago',
+    'chicago il':      'chicago',
+    'dallas':          'dallas',
+    'dallas tx':       'dallas',
+    'los angeles':     'losangeles',
+    'los angeles ca':  'losangeles',
+    'la':              'losangeles',
+    'phoenix':         'phoenix',
+    'phoenix az':      'phoenix',
+  };
+
+  return MAP[input] || input.replace(/\s+/g, '');
+}
+
+async function fetchViaApify(citySlug, keywords, limit, apiKey) {
+  const searchUrl = `https://${citySlug}.craigslist.org/search/res?query=${encodeURIComponent(keywords)}&sort=date`;
+  console.log(`[Craigslist Apify] Scraping ${searchUrl} (limit ${limit})`);
+
+  const response = await fetch(
+    `https://api.apify.com/v2/acts/solidcode~craigslist-scraper/run-sync-get-dataset-items?timeout=120&memory=512`,
+    {
+      method:  'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        startUrls: [{ url: searchUrl }],
+        maxItems:  limit,
+      }),
+      signal: AbortSignal.timeout(130000), // 130s — Apify sync timeout is 120s
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => response.statusText);
+    let parsed = errText;
+    try {
+      const j = JSON.parse(errText);
+      if (j?.error?.message) parsed = j.error.message;
+    } catch {}
+    throw new Error(`Apify HTTP ${response.status}: ${parsed.slice(0, 200)}`);
+  }
+
+  const data = await response.json();
+  if (!Array.isArray(data)) throw new Error(`Apify returned non-array: ${JSON.stringify(data).slice(0, 200)}`);
+
+  const items = data.filter(r => r && r.title).slice(0, limit).map(r => {
+    const desc           = r.description || r.postingBody || '';
+    const phoneFromDesc  = desc.match(/\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}/)?.[0] || '';
+    const emailFromDesc  = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0] || '';
+    return {
+      title:       r.title       || 'Untitled',
+      description: desc.slice(0, 500),
+      phone:       r.phone       || phoneFromDesc || '',
+      email:       r.email       || r.replyEmail  || emailFromDesc || '',
+      link:        r.url         || r.link        || '',
+      date:        r.postedAt    || r.date        || '',
+      market:      citySlug,
+    };
+  });
+
+  console.log(`[Craigslist Apify] ${items.length} resumes returned for ${citySlug}`);
+  return items;
+}
+
+async function fetchViaRSS(citySlug, keywords, limit) {
+  const url = `https://${citySlug}.craigslist.org/search/res?query=${encodeURIComponent(keywords)}&format=rss&sort=date`;
+  console.log('[Craigslist RSS] Fallback fetch:', url);
+
+  const controller = new AbortController();
+  const timeout    = setTimeout(() => controller.abort(), 10000);
+
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept':     'application/rss+xml, application/xml, text/xml, */*',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+    signal: controller.signal,
+  });
+  clearTimeout(timeout);
+
+  if (res.status === 403) throw new Error('Craigslist returned 403 (anti-bot block on RSS)');
+  if (!res.ok)           throw new Error(`Craigslist RSS returned ${res.status}`);
+
+  const xml = await res.text();
+  if (xml.includes('<title>blocked</title>') || xml.includes('blocked')) {
+    throw new Error('Craigslist RSS: request blocked');
+  }
+
+  if (!xml.includes('<item>')) {
+    console.warn('[Craigslist RSS] No items in response for:', citySlug);
+    return [];
+  }
+
+  const items    = [];
+  const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+  let match;
+
+  while ((match = itemRegex.exec(xml)) !== null && items.length < limit) {
+    const block = match[1];
+    const title = (
+      block.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/)?.[1] ||
+      block.match(/<title>(.*?)<\/title>/)?.[1] || ''
+    ).trim();
+    const link = (
+      block.match(/<link>(.*?)<\/link>/)?.[1] ||
+      block.match(/<guid[^>]*>(.*?)<\/guid>/)?.[1] || ''
+    ).trim();
+    const desc = (
+      block.match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/)?.[1] ||
+      block.match(/<description>([\s\S]*?)<\/description>/)?.[1] || ''
+    ).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    const date  = (block.match(/<pubDate>(.*?)<\/pubDate>/)?.[1] || '').trim();
+    const phone = desc.match(/\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}/)?.[0] || '';
+    const email = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0] || '';
+
+    if (title && link) {
+      items.push({ title, description: desc, phone, email, link, date, market: citySlug });
+    }
+  }
+
+  console.log(`[Craigslist RSS] ${items.length} resumes found for ${citySlug}`);
+  return items;
+}
+
+// ─── Resume Lead Distribution API (Workflow C) ───────────────────────────────
+
+/**
+ * GET /api/resume-leads/my-leads
+ * Returns today's resume leads for the logged-in recruiting agent.
+ */
+app.get('/api/resume-leads/my-leads', requireResumeAccess, async (req, res) => {
+  try {
+    const { name } = req.user;
+    const today = new Date().toISOString().slice(0, 10);
+    const leads = await getResumeLeadsByAgent(name, today);
+    res.json({ leads, agent: name, date: today });
+  } catch (err) {
+    console.error('[proxy] GET /api/resume-leads/my-leads:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PATCH /api/resume-leads/:id/status
+ * Update status and/or outreach notes for a resume lead.
+ */
+app.patch('/api/resume-leads/:id/status', requireResumeAccess, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, notes } = req.body || {};
+    const updated = await updateResumeLeadStatus(id, status, notes);
+    if (!updated) return res.status(500).json({ error: 'Failed to update resume lead' });
+    res.json(updated);
+  } catch (err) {
+    console.error('[proxy] PATCH /api/resume-leads/:id/status:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/resume-leads/stats
+ * Performance stats: per-agent + per-market + dedup count.
+ * Supports ?date=, ?market=, ?agent= query filters.
+ */
+app.get('/api/resume-leads/stats', requireResumeAdmin, async (req, res) => {
+  try {
+    const { date, market, agent } = req.query;
+    const stats = await getResumeLeadStats({
+      dateFilter:   date   || '',
+      marketFilter: market || '',
+      agentFilter:  agent  || '',
+    });
+    res.json(stats);
+  } catch (err) {
+    console.error('[proxy] GET /api/resume-leads/stats:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/resume-leads/distribute-now
+ * Manually trigger resume distribution for the given cities + keywords.
+ * Body: { cities: string[], keywords?: string, leadsPerAgent?: number }
+ * Cities are specified by the admin — NOT hardcoded.
+ */
+app.post('/api/resume-leads/distribute-now', requireResumeAdmin, async (req, res) => {
+  try {
+    const {
+      cities     = [],
+      keywords   = RESUME_SEARCH_KEYWORDS,
+      leadsPerAgent = DAILY_RESUME_LEADS_PER_WCR,
+    } = req.body || {};
+
+    if (!cities.length) {
+      return res.status(400).json({ error: 'cities array is required — select at least one city' });
+    }
+
+    // Run distribution asynchronously and respond immediately
+    res.json({ started: true, cities, keywords, leadsPerAgent });
+
+    // Import distributeResumeLeads from automationWorker is not possible (circular),
+    // so we call the distribution logic inline here.
+    setImmediate(async () => {
+      try {
+        const agents = await getRecruitingAgents();
+        if (!agents.length) {
+          await appendLog({ task: 'Manual distribution skipped', target: 'No recruiting agents found', status: 'alert' });
+          return;
+        }
+
+        const globalDedupeSet = await getGlobalResumeDeduplicationSet();
+        let freshResumes = [];
+
+        for (const citySlug of cities) {
+          try {
+            const results = await searchCraigslistResumes(citySlug, keywords, 100);
+            const newOnly = results.filter(r => {
+              const url = (r.link || '').trim().toLowerCase();
+              return url && !globalDedupeSet.has(url);
+            });
+            freshResumes = [...freshResumes, ...newOnly.map(r => ({ ...r, market: CITY_SUBDOMAINS[citySlug] || citySlug }))];
+            console.log(`[Manual Dist] ${citySlug}: ${results.length} found, ${newOnly.length} new`);
+          } catch (e) {
+            console.error(`[Manual Dist] Failed ${citySlug}:`, e.message);
+          }
+        }
+
+        // De-dup within this batch
+        const seen = new Set();
+        freshResumes = freshResumes.filter(r => {
+          const url = (r.link || '').trim().toLowerCase();
+          if (seen.has(url)) return false;
+          seen.add(url);
+          return true;
+        });
+
+        console.log(`[Manual Dist] ${freshResumes.length} fresh resumes, distributing to ${agents.length} agents`);
+        let pool = [...freshResumes];
+
+        for (const agent of agents) {
+          const batch = pool.splice(0, leadsPerAgent);
+          if (!batch.length) {
+            await appendLog({ task: 'Resume distribution skipped', target: `${agent.name} — pool exhausted`, status: 'alert' });
+            continue;
+          }
+          const result = await bulkAssignResumeLeads(batch, agent.name, '');
+          await appendLog({ task: 'Manual resume leads assigned', target: `${agent.name} → ${result.assigned} leads (${result.skipped} skipped)`, status: 'ok' });
+          console.log(`[Manual Dist] ${agent.name}: ${result.assigned} assigned, ${result.skipped} skipped`);
+        }
+
+        console.log('[Manual Dist] Complete');
+      } catch (err) {
+        console.error('[Manual Dist] Error:', err.message);
+        await appendLog({ task: 'Manual distribution error', target: err.message, status: 'error' }).catch(() => {});
+      }
+    });
+  } catch (err) {
+    console.error('[proxy] POST /api/resume-leads/distribute-now:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/resume-leads/dedup-stats
+ * Returns the count of permanently locked resume URLs.
+ */
+app.get('/api/resume-leads/dedup-stats', requireResumeAdmin, async (req, res) => {
+  try {
+    const set = await getGlobalResumeDeduplicationSet();
+    res.json({ totalLocked: set.size });
+  } catch (err) {
+    console.error('[proxy] GET /api/resume-leads/dedup-stats:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/resume-leads/available-cities
+ * Returns the list of all available Craigslist cities for the city picker.
+ */
+app.get('/api/resume-leads/available-cities', requireResumeAdmin, async (req, res) => {
+  const cities = Object.entries(CITY_SUBDOMAINS).map(([slug, label]) => ({ slug, label }));
+  res.json({ cities });
+});
+
+/**
+ * GET /api/resume-leads/recruiting-agents
+ * Returns the list of active recruiting agents (for admin bulk assign dropdown).
+ */
+app.get('/api/resume-leads/recruiting-agents', requireResumeAdmin, async (req, res) => {
+  try {
+    const agents = await getRecruitingAgents();
+    res.json({ agents });
+  } catch (err) {
+    console.error('[proxy] GET /api/resume-leads/recruiting-agents:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/resume-leads/bulk-assign
+// Body: { city, keywords, agentNames[], countPerAgent }
+
+app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) => {
+  const {
+    city          = 'newyork',
+    keywords      = 'sales commission cold calling',
+    agentNames    = [],
+    countPerAgent = 20,
+  } = req.body;
+
+  if (!agentNames || agentNames.length === 0) {
+    return res.status(400).json({ error: 'No agents selected' });
+  }
+
+  try {
+    const today = new Date().toISOString().split('T')[0];
+
+    // Step 1 — Fetch fresh resumes from Craigslist
+    console.log(`[BulkAssign] Fetching resumes for ${city}...`);
+    const allResults = await searchCraigslistResumes(city, keywords, agentNames.length * countPerAgent * 2);
+
+    if (allResults.length === 0) {
+      return res.status(200).json({
+        success: false,
+        message: `No resumes found for "${city}" with keywords "${keywords}". Try a different city or keywords.`,
+        assigned: 0,
+      });
+    }
+
+    // Step 2 — Load global dedup set
+    const globalDedupeSet = await getGlobalResumeDeduplicationSet();
+
+    // Step 3 — Filter out already-assigned resumes
+    const freshResumes = allResults.filter(r => {
+      const url = (r.link || '').trim().toLowerCase();
+      return url && !globalDedupeSet.has(url);
+    });
+
+    console.log(`[BulkAssign] ${allResults.length} found → ${freshResumes.length} are fresh`);
+
+    if (freshResumes.length === 0) {
+      return res.status(200).json({
+        success: false,
+        message: `All ${allResults.length} resumes found for "${city}" have already been assigned before. Try a different city or keywords.`,
+        assigned: 0,
+      });
+    }
+
+    // Step 4 — Assign to each selected agent
+    let pool    = [...freshResumes];
+    let summary = [];
+
+    for (const agentName of agentNames) {
+      const batch = pool.splice(0, countPerAgent);
+      if (batch.length === 0) {
+        summary.push({ agent: agentName, assigned: 0, note: 'Pool exhausted' });
+        continue;
+      }
+
+      for (const resume of batch) {
+        const url = (resume.link || '').trim().toLowerCase();
+        // Save to ResumeLeads working table
+        await saveResumeLead({
+          title:         resume.title,
+          description:   resume.description,
+          phone:         resume.phone || '',
+          craigslistUrl: url,
+          market:        city,
+          assignedTo:    agentName,
+          assignedDate:  today,
+          status:        'New',
+        });
+        // Lock permanently in dedup registry
+        await registerResumeAsAssigned(url, agentName, today);
+        globalDedupeSet.add(url);
+      }
+
+      summary.push({ agent: agentName, assigned: batch.length });
+
+      await appendLog({
+        task:   'Bulk resume leads assigned',
+        target: `${agentName} → ${batch.length} resumes from ${city}`,
+        status: 'ok',
+      });
+    }
+
+    const totalAssigned = summary.reduce((s, r) => s + r.assigned, 0);
+    console.log(`[BulkAssign] Complete — ${totalAssigned} resumes assigned across ${agentNames.length} agents`);
+
+    res.json({
+      success:      true,
+      totalAssigned,
+      freshFound:   freshResumes.length,
+      totalFound:   allResults.length,
+      summary,
+    });
+
+  } catch (err) {
+    console.error('[BulkAssign] Error:', err.message);
+    res.status(500).json({ error: err.message, success: false });
+  }
+});
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
@@ -1064,6 +1429,12 @@ app.listen(PORT, () => {
   console.log(`  Airtable: ${airtableReady() ? '✓ connected' : '✗ not configured'}`);
   console.log(`  Email:    ${emailReady() ? '✓ Resend ready' : '✗ demo mode (console)'}`);
   console.log();
+
+  if (airtableReady()) {
+    verifyAirtableTables().catch(err => {
+      console.warn('[proxy] Table verification check failed:', err.message);
+    });
+  }
 
   // Debug: list all registered API routes
   console.log('[proxy] Registered routes:');

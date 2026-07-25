@@ -278,3 +278,16 @@ export const AUTOMATION_TASKS = [
   { name: 'Franchise market research',     trigger: 'On demand',                               status: 'active',  runs: 0, lastRun: 'Never' },
 ];
 
+export const RECRUITING_AGENTS = [
+  { name: 'Janina',    email: 'janina@waveclosers.com'   },
+  { name: 'John M',    email: 'johnm@waveclosers.com'    },
+  { name: 'Giana',     email: 'giana@waveclosers.com'    },
+  { name: 'Julius B',  email: 'juliusb@waveclosers.com'  },
+  { name: 'Karen M',   email: 'karenm@waveclosers.com'   },
+  { name: 'Jemelyn',   email: 'jemelyna@waveclosers.com' },
+  { name: 'Manilyn',   email: 'manilynp@waveclosers.com' },
+  { name: 'Melanie',   email: 'melaniea@waveclosers.com' },
+  { name: 'April S',   email: 'aprils@waveclosers.com'   },
+];
+
+

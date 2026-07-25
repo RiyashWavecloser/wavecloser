@@ -104,7 +104,8 @@ export function requireAuth(req, res, next) {
 
   const payload = verifyToken(token);
   if (!payload) {
-    return res.status(403).json({ error: 'Invalid or expired session token' });
+    // Return 401 (not 403) so the frontend auto-logout handler triggers on expired/invalid tokens
+    return res.status(401).json({ error: 'Session expired — please log in again' });
   }
 
   req.user = payload;
