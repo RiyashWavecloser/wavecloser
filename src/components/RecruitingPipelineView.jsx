@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Card, CardHeader, Note } from './ui.jsx';
 import {
-  RECRUIT_STATUSES, RECRUIT_STAGES, RECRUIT_SOURCES, RECRUIT_TYPES, ONBOARDING_STAGES,
+  RECRUIT_STATUSES, RECRUIT_STAGES, RECRUIT_SOURCES, RECRUIT_TYPES, ONBOARDING_STAGES, CRAIGSLIST_CITIES,
 } from '../data/constants.js';
 import {
   getRecruitingPipelineAPI,
@@ -36,20 +36,7 @@ const BLANK_FORM = {
   name: '', email: '', phone: '', source: 'LinkedIn', type: 'Independent Rep', notes: '',
 };
 
-const CRAIGSLIST_CITIES = [
-  { label: 'New York',        value: 'newyork' },
-  { label: 'New Jersey',      value: 'newjersey' },
-  { label: 'Connecticut',     value: 'newhaven' },
-  { label: 'Brooklyn',        value: 'brooklyn' },
-  { label: 'Queens',          value: 'queens' },
-  { label: 'Bronx',           value: 'bronx' },
-  { label: 'Staten Island',   value: 'statenisland' },
-  { label: 'Newark NJ',       value: 'newark' },
-  { label: 'Jersey City NJ',  value: 'jerseycity' },
-  { label: 'Bridgeport CT',   value: 'bridgeport' },
-  { label: 'Hartford CT',     value: 'hartford' },
-  { label: 'Stamford CT',     value: 'stamford' },
-];
+
 
 const DEFAULT_KEYWORDS = 'sales, commission, cold calling, payment processing, B2B sales';
 

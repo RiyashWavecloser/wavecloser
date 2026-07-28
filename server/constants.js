@@ -138,6 +138,17 @@ export const CITY_SUBDOMAINS = {
   dallas:         'Dallas, TX',
   atlanta:        'Atlanta, GA',
   phoenix:        'Phoenix, AZ',
+  washingtondc:   'Washington, D.C.',
+  seattle:        'Seattle, WA',
+  brooklyn:       'Brooklyn, NY',
+  queens:         'Queens, NY',
+  bronx:          'Bronx, NY',
+  statenisland:   'Staten Island, NY',
+  newark:         'Newark, NJ',
+  jerseycity:     'Jersey City, NJ',
+  bridgeport:     'Bridgeport, CT',
+  stamford:       'Stamford, CT',
+  newhaven:       'Connecticut / New Haven',
 };
 
 export const RECRUITING_AGENTS = [
@@ -150,6 +161,31 @@ export const RECRUITING_AGENTS = [
   { name: 'Manilyn',   email: 'manilynp@waveclosers.com' },
   { name: 'Melanie',   email: 'melaniea@waveclosers.com' },
   { name: 'April S',   email: 'aprils@waveclosers.com'   },
+];
+
+export const CRAIGSLIST_CITIES = [
+  { label: 'New York',             value: 'newyork' },
+  { label: 'New Jersey',           value: 'newjersey' },
+  { label: 'Connecticut',          value: 'newhaven' },
+  { label: 'Brooklyn',             value: 'brooklyn' },
+  { label: 'Queens',               value: 'queens' },
+  { label: 'Bronx',                value: 'bronx' },
+  { label: 'Staten Island',        value: 'statenisland' },
+  { label: 'Newark NJ',            value: 'newark' },
+  { label: 'Jersey City NJ',       value: 'jerseycity' },
+  { label: 'Bridgeport CT',        value: 'bridgeport' },
+  { label: 'Hartford CT',          value: 'hartford' },
+  { label: 'Stamford CT',          value: 'stamford' },
+  { label: 'Houston, TX',          value: 'houston' },
+  { label: 'Dallas–Fort Worth, TX', value: 'dallas' },
+  { label: 'Atlanta, GA',          value: 'atlanta' },
+  { label: 'Miami, FL',            value: 'miami' },
+  { label: 'Boston, MA',           value: 'boston' },
+  { label: 'Chicago, IL',          value: 'chicago' },
+  { label: 'New York City, NY',    value: 'newyork' },
+  { label: 'Los Angeles, CA',      value: 'losangeles' },
+  { label: 'Washington, D.C.',     value: 'washingtondc' },
+  { label: 'Seattle, WA',          value: 'seattle' },
 ];
 
 

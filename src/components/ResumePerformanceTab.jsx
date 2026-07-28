@@ -17,7 +17,7 @@ import {
   fetchDedupStats,
   bulkAssignResumes,
 } from '../lib/dataLayer.js';
-import { RECRUITING_AGENTS } from '../data/constants.js';
+import { RECRUITING_AGENTS, CRAIGSLIST_CITIES } from '../data/constants.js';
 
 function agentStatusIcon(a) {
   if (a.contacted >= 10) return '✅';
@@ -316,15 +316,29 @@ export default function ResumePerformanceTab({ currentUser }) {
               <button onClick={() => setShowDistModal(false)} style={S.closeBtn}>✕</button>
             </div>
 
-            {/* City input — free text, not dropdown */}
+            {/* City input — free text + quick selection chips */}
             <label style={S.label}>City / Location</label>
             <input
               value={city}
               onChange={e => setCity(e.target.value)}
-              placeholder="e.g. New York NY, Newark NJ, Miami FL, Chicago IL"
+              placeholder="e.g. Houston TX, Miami FL, Dallas TX, Chicago IL..."
               style={S.input}
             />
-            <div style={S.hint}>Type any US city — the system will match the Craigslist region automatically</div>
+            <div style={S.cityGrid}>
+              {CRAIGSLIST_CITIES.map(c => (
+                <div
+                  key={c.label}
+                  onClick={() => setCity(c.label)}
+                  style={{
+                    ...S.cityChip,
+                    ...(city.toLowerCase() === c.label.toLowerCase() || city.toLowerCase() === c.value.toLowerCase() ? S.cityChipActive : {})
+                  }}
+                >
+                  {c.label}
+                </div>
+              ))}
+            </div>
+            <div style={S.hint}>Type any US city or click a quick selection chip above</div>
 
             {/* Keywords */}
             <label style={S.label}>Search Keywords</label>
