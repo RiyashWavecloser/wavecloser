@@ -1439,9 +1439,12 @@ export async function saveResumeLead(data) {
  * If date is null, returns all leads for the agent.
  */
 export async function getResumeLeadsByAgent(agentName, date) {
-  if (!isConfigured()) return [];
+  if (!isConfigured() || !agentName) return [];
   try {
-    const formulas = [`{AssignedTo} = "${agentName}"`];
+    const cleanName = (agentName || '').split('@')[0].trim();
+    const formulas = [
+      `OR({AssignedTo} = "${agentName}", {AssignedTo} = "${cleanName}", LOWER({AssignedTo}) = "${cleanName.toLowerCase()}")`
+    ];
     if (date) formulas.push(`DATETIME_FORMAT({AssignedDate}, 'YYYY-MM-DD') = "${date}"`);
     const formula = formulas.length > 1 ? `AND(${formulas.join(',')})` : formulas[0];
     const records = await retry(() =>
@@ -1461,7 +1464,7 @@ export async function getResumeLeadsByAgent(agentName, date) {
       craigslistUrl: r.get('CraigslistURL') || '',
       market:        r.get('Market')        || '',
       assignedTo:    r.get('AssignedTo')    || '',
-      assignedDate:  r.get('AssignedDate')  || '',
+      assignedDate:  String(r.get('AssignedDate') || '').slice(0, 10),
       status:        r.get('Status')        || 'New',
       outreachNotes: r.get('OutreachNotes') || '',
       contactedAt:   r.get('ContactedAt')   || '',

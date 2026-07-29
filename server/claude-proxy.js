@@ -948,7 +948,15 @@ app.get('/api/resume-leads/craigslist-search', async (req, res) => {
 
   try {
     const results = await searchCraigslistResumes(city, keywords, limit);
-    res.json({ results, total: results.length, city, keywords });
+    const globalDedupeSet = await getGlobalResumeDeduplicationSet();
+    const annotated = results.map(r => {
+      const url = (r.link || '').trim().toLowerCase();
+      return {
+        ...r,
+        alreadyAssigned: url ? globalDedupeSet.has(url) : false,
+      };
+    });
+    res.json({ results: annotated, total: annotated.length, city, keywords });
   } catch (err) {
     console.error('[Craigslist] search error:', err.message);
     res.status(500).json({ error: err.message, results: [] });
@@ -1364,18 +1372,44 @@ app.get('/api/resume-leads/recruiting-agents', requireResumeAdmin, async (req, r
   }
 });
 
-// POST /api/resume-leads/bulk-assign
-// Body: { city, keywords, agentNames[], countPerAgent }
-
 app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) => {
   const {
+    resumes,
+    agentName,
+    market,
     city          = 'newyork',
     keywords      = 'sales commission cold calling',
     agentNames    = [],
     countPerAgent = 20,
-  } = req.body;
+  } = req.body || {};
 
-  if (!agentNames || agentNames.length === 0) {
+  // Payload Case 1 — Direct selection payload: { resumes: [...], agentName, market }
+  if (Array.isArray(resumes) && resumes.length > 0) {
+    const targetAgent = agentName || (agentNames.length > 0 ? agentNames[0] : '');
+    if (!targetAgent) {
+      return res.status(400).json({ error: 'No target agent specified' });
+    }
+    try {
+      const result = await bulkAssignResumeLeads(resumes, targetAgent, market || city);
+      return res.json({
+        success: true,
+        assigned: result.assigned,
+        skipped:  result.skipped,
+        totalAssigned: result.assigned,
+        summary:  [{ agent: targetAgent, assigned: result.assigned }],
+      });
+    } catch (err) {
+      console.error('[proxy] POST /api/resume-leads/bulk-assign (direct):', err.message);
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // Payload Case 2 — Auto search & round-robin payload: { city, keywords, agentNames[], countPerAgent }
+  const targetAgents = Array.isArray(agentNames) && agentNames.length > 0
+    ? agentNames
+    : (agentName ? [agentName] : []);
+
+  if (targetAgents.length === 0) {
     return res.status(400).json({ error: 'No agents selected' });
   }
 
@@ -1384,7 +1418,7 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
 
     // Step 1 — Fetch fresh resumes from Craigslist
     console.log(`[BulkAssign] Fetching resumes for ${city}...`);
-    const allResults = await searchCraigslistResumes(city, keywords, agentNames.length * countPerAgent * 2);
+    const allResults = await searchCraigslistResumes(city, keywords, targetAgents.length * countPerAgent * 2);
 
     if (allResults.length === 0) {
       return res.status(200).json({
@@ -1415,7 +1449,7 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
 
     // Step 4 — Assign to each selected agent using Round-Robin distribution
     const buckets = {};
-    for (const name of agentNames) {
+    for (const name of targetAgents) {
       buckets[name] = [];
     }
 
@@ -1423,15 +1457,15 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
     let agentIndex = 0;
 
     while (pool.length > 0) {
-      const agentName = agentNames[agentIndex];
+      const name = targetAgents[agentIndex];
 
       // Only add if this agent hasn't reached countPerAgent limit yet
-      if (buckets[agentName].length < countPerAgent) {
-        buckets[agentName].push(pool.shift()); // take one resume from pool
+      if (buckets[name].length < countPerAgent) {
+        buckets[name].push(pool.shift()); // take one resume from pool
       }
 
       // Rotate to next agent
-      agentIndex = (agentIndex + 1) % agentNames.length;
+      agentIndex = (agentIndex + 1) % targetAgents.length;
 
       // Stop if all selected agents have reached their countPerAgent limit
       const allFull = agentNames.every(name => buckets[name].length >= countPerAgent);

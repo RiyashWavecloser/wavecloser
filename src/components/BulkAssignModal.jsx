@@ -185,7 +185,14 @@ export default function BulkAssignModal({ onClose }) {
                         />
                       </td>
                       <td style={{ ...S.td, maxWidth: 280 }}>
-                        <div style={S.rTitle}>{r.title}</div>
+                        <div style={S.rTitle}>
+                          {r.title}
+                          {r.alreadyAssigned && (
+                            <span style={{ marginLeft: 8, fontSize: 10, background: '#FEE2E2', color: '#991B1B', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>
+                              Already Assigned
+                            </span>
+                          )}
+                        </div>
                         {r.description && <div style={S.rDesc}>{r.description.slice(0, 100)}{r.description.length > 100 ? '...' : ''}</div>}
                       </td>
                       <td style={S.td}>

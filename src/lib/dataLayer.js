@@ -54,9 +54,10 @@ export function clearMustChangePassword() {
 
 
 function getHeaders() {
+  const token = localStorage.getItem('wc_session_token') || _token;
   const headers = { 'Content-Type': 'application/json' };
-  if (_token) {
-    headers['Authorization'] = `Bearer ${_token}`;
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
   }
   return headers;
 }
@@ -64,8 +65,9 @@ function getHeaders() {
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
 
 async function get(path) {
+  const token = localStorage.getItem('wc_session_token') || _token;
   const headers = {};
-  if (_token) headers['Authorization'] = `Bearer ${_token}`;
+  if (token) headers['Authorization'] = `Bearer ${token}`;
   
   const res = await fetch(`${PROXY}${path}`, { headers });
   if (res.status === 401) {
@@ -690,15 +692,7 @@ export async function bulkAssignResumes({ city, keywords, agentNames, countPerAg
     };
   }
   try {
-    const res = await fetch(`${PROXY}/api/resume-leads/bulk-assign`, {
-      method:  'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization:  `Bearer ${_token}`,
-      },
-      body: JSON.stringify({ city, keywords, agentNames, countPerAgent }),
-    });
-    return await res.json();
+    return await post('/api/resume-leads/bulk-assign', { city, keywords, agentNames, countPerAgent });
   } catch (e) {
     return { success: false, message: e.message };
   }
