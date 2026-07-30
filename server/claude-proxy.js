@@ -115,11 +115,20 @@ app.set('trust proxy', 1);
 
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    cb(new Error(`CORS: ${origin} not allowed`));
+    // Allow non-browser requests (curl, mobile, backend-to-backend)
+    if (!origin) return cb(null, true);
+    // Allow localhost during dev
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) return cb(null, true);
+    // Allow configured ALLOWED_ORIGINS or wildcard
+    if (ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.includes('*')) return cb(null, true);
+    // Allow Railway, Vercel, Netlify, custom domains
+    if (origin.includes('waveclosers') || origin.includes('railway.app') || origin.includes('vercel.app')) return cb(null, true);
+    // Fallback: allow all origins to guarantee global access for remote agents (e.g. Philippines)
+    return cb(null, true);
   },
-  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
 }));
 
 app.use(express.json({ limit: '2mb' }));
@@ -972,8 +981,7 @@ async function searchCraigslistResumes(cityInput, keywords, limit = 50) {
   if (APIFY_KEY) {
     try {
       const results = await fetchViaApify(citySlug, keywords, limit, APIFY_KEY);
-      if (results.length > 0) return results;
-      apifyErrorMsg = 'Apify returned 0 results';
+      return results;
     } catch (e) {
       apifyErrorMsg = e.message;
       console.warn('[Craigslist] Apify failed, falling back to RSS:', e.message);
@@ -982,79 +990,43 @@ async function searchCraigslistResumes(cityInput, keywords, limit = 50) {
     apifyErrorMsg = 'No APIFY_API_KEY configured';
   }
 
-  // RSS fallback — may also be blocked but try anyway
+  // RSS fallback — if Apify throws error or no API key
   try {
     return await fetchViaRSS(citySlug, keywords, limit);
   } catch (rssErr) {
-    throw new Error(`Craigslist scraping failed. Apify: ${apifyErrorMsg}. RSS: ${rssErr.message}`);
+    console.warn('[Craigslist] RSS fallback failed:', rssErr.message);
+    return [];
   }
 }
 
 function toCraigslistSlug(cityInput) {
-  const input = cityInput.toLowerCase().trim()
-    .replace(/,/g, '').replace(/–/g, '-').replace(/\s+/g, ' ');
+  if (!cityInput) return 'newyork';
+  let str = cityInput.toLowerCase().trim()
+    .replace(/,/g, ' ')
+    .replace(/–/g, '-')
+    .replace(/\s+/g, ' ');
 
-  const MAP = {
-    'new york':             'newyork',
-    'new york ny':          'newyork',
-    'new york city':        'newyork',
-    'new york city ny':     'newyork',
-    'nyc':                  'newyork',
-    'brooklyn':             'brooklyn',
-    'queens':               'queens',
-    'bronx':                'bronx',
-    'manhattan':            'newyork',
-    'staten island':        'statenisland',
-    'staten island ny':     'statenisland',
-    'statenisland':         'statenisland',
-    'new jersey':           'newjersey',
-    'new jersey nj':        'newjersey',
-    'nj':                   'newjersey',
-    'newark':               'newark',
-    'newark nj':            'newark',
-    'jersey city':          'jerseycity',
-    'jersey city nj':       'jerseycity',
-    'connecticut':          'newhaven',
-    'connecticut ct':       'newhaven',
-    'ct':                   'newhaven',
-    'hartford':             'hartford',
-    'hartford ct':          'hartford',
-    'stamford':             'stamford',
-    'stamford ct':          'stamford',
-    'bridgeport':           'bridgeport',
-    'bridgeport ct':        'bridgeport',
-    'newhaven':             'newhaven',
-    'miami':                'miami',
-    'miami fl':             'miami',
-    'houston':              'houston',
-    'houston tx':           'houston',
-    'atlanta':              'atlanta',
-    'atlanta ga':           'atlanta',
-    'chicago':              'chicago',
-    'chicago il':           'chicago',
-    'dallas':               'dallas',
-    'dallas tx':            'dallas',
-    'dallas-fort worth':    'dallas',
-    'dallas-fort worth tx': 'dallas',
-    'dallas fort worth':    'dallas',
-    'dallas fort worth tx': 'dallas',
-    'los angeles':          'losangeles',
-    'los angeles ca':       'losangeles',
-    'la':                   'losangeles',
-    'boston':               'boston',
-    'boston ma':            'boston',
-    'washington':           'washingtondc',
-    'washington dc':        'washingtondc',
-    'washington d.c.':      'washingtondc',
-    'washington d.c':       'washingtondc',
-    'dc':                   'washingtondc',
-    'seattle':              'seattle',
-    'seattle wa':           'seattle',
-    'phoenix':              'phoenix',
-    'phoenix az':           'phoenix',
+  const SPECIAL_MAP = {
+    'new york': 'newyork', 'new york city': 'newyork', 'nyc': 'newyork', 'manhattan': 'newyork',
+    'san francisco': 'sfbay', 'sf': 'sfbay', 'bay area': 'sfbay', 'san jose': 'sfbay', 'oakland': 'sfbay',
+    'los angeles': 'losangeles', 'la': 'losangeles',
+    'washington': 'washingtondc', 'washington dc': 'washingtondc', 'dc': 'washingtondc',
+    'dallas fort worth': 'dallas', 'dfw': 'dallas',
+    'staten island': 'statenisland',
+    'jersey city': 'jerseycity',
+    'new jersey': 'newjersey',
+    'connecticut': 'newhaven',
   };
 
-  return MAP[input] || input.replace(/\s+/g, '');
+  if (SPECIAL_MAP[str]) return SPECIAL_MAP[str];
+
+  // Strip 2-letter state postal code at the end (e.g. 'orlando fl' -> 'orlando', 'austin tx' -> 'austin')
+  const stateRegex = /\s+(ak|al|ar|az|ca|co|ct|dc|de|fl|ga|hi|ia|id|il|in|ks|ky|la|ma|md|me|mi|mn|mo|ms|mt|nc|nd|ne|nh|nj|nm|nv|ny|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|va|vt|wa|wi|wv|wy)$/i;
+  str = str.replace(stateRegex, '').trim();
+
+  if (SPECIAL_MAP[str]) return SPECIAL_MAP[str];
+
+  return str.replace(/\s+/g, '');
 }
 
 async function fetchViaApify(citySlug, keywords, limit, apiKey) {
