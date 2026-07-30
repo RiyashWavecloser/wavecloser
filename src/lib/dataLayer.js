@@ -697,3 +697,17 @@ export async function bulkAssignResumes({ city, keywords, agentNames, countPerAg
     return { success: false, message: e.message };
   }
 }
+
+/**
+ * Agent self-service: search Craigslist for fresh leads and self-assign them.
+ * city     — free-text city name, e.g. "Houston, TX" or "Miami"
+ * keywords — search keyword(s), e.g. "sales" or "customer service"
+ * count    — how many leads to grab (max 100)
+ */
+export async function agentSelfSearchAndClaim(city, keywords, count = 20) {
+  try {
+    return await post('/api/resume-leads/agent-self-search', { city, keywords, count });
+  } catch (e) {
+    return { success: false, message: e.message, assigned: 0, leads: [] };
+  }
+}

@@ -1525,6 +1525,112 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
   }
 });
 
+// ─── POST /api/resume-leads/agent-self-search ────────────────────────────────
+// Allows wave_closer_recruiter agents to search Craigslist themselves.
+// Body: { city: string, keywords: string, count: number }
+// Returns fresh (non-duplicate) leads AND assigns them directly to the calling agent.
+
+app.post('/api/resume-leads/agent-self-search', requireResumeAccess, async (req, res) => {
+  const {
+    city     = '',
+    keywords = 'sales',
+    count    = 20,
+  } = req.body || {};
+
+  const agentName = req.user?.name || req.user?.email || '';
+  const market    = city.trim() || 'Unknown City';
+
+  if (!city.trim()) {
+    return res.status(400).json({ error: 'City is required. Enter a city name like "Houston, TX" or "Miami".' });
+  }
+
+  try {
+    const fetchLimit = Math.min(Math.max(parseInt(count) || 20, 1), 100);
+    const today = new Date().toISOString().split('T')[0];
+
+    // 1 — Search Craigslist
+    console.log(`[AgentSelfSearch] ${agentName} searching "${city}" for "${keywords}" (limit ${fetchLimit * 3})...`);
+    const allResults = await searchCraigslistResumes(city, keywords, fetchLimit * 3);
+
+    if (allResults.length === 0) {
+      return res.json({
+        success: false,
+        message: `No Craigslist resumes found for "${city}" with keyword "${keywords}". Try a different city or keyword.`,
+        assigned: 0,
+        leads: [],
+      });
+    }
+
+    // 2 — Filter already-assigned resumes
+    const globalDedupeSet = await getGlobalResumeDeduplicationSet();
+    const freshResumes = allResults.filter(r => {
+      const url = (r.link || '').trim().toLowerCase();
+      return url && !globalDedupeSet.has(url);
+    }).slice(0, fetchLimit);
+
+    console.log(`[AgentSelfSearch] ${allResults.length} found → ${freshResumes.length} fresh → will assign ${Math.min(freshResumes.length, fetchLimit)}`);
+
+    if (freshResumes.length === 0) {
+      return res.json({
+        success: false,
+        message: `All ${allResults.length} resumes found for "${city}" have already been assigned. Try a different city or keyword.`,
+        assigned: 0,
+        leads: [],
+      });
+    }
+
+    // 3 — Save & register each fresh lead to the calling agent
+    const savedLeads = [];
+    for (const resume of freshResumes) {
+      const rawUrl      = (resume.link || resume.craigslistUrl || resume.url || '').trim();
+      const urlForDedup = rawUrl.toLowerCase();
+
+      await saveResumeLead({
+        title:         resume.title,
+        description:   resume.description || '',
+        phone:         resume.phone  || '',
+        email:         resume.email  || '',
+        craigslistUrl: rawUrl,
+        market,
+        assignedTo:    agentName,
+        assignedDate:  today,
+        status:        'New',
+      });
+      await registerResumeAsAssigned(rawUrl, agentName, today);
+      globalDedupeSet.add(urlForDedup);
+
+      savedLeads.push({
+        title:  resume.title,
+        phone:  resume.phone,
+        email:  resume.email,
+        link:   rawUrl,
+        market,
+        status: 'New',
+        assignedDate: today,
+      });
+    }
+
+    await appendLog({
+      task:   'Agent self-search leads',
+      target: `${agentName} → ${savedLeads.length} resumes from "${city}" (keyword: ${keywords})`,
+      status: 'ok',
+    });
+
+    return res.json({
+      success:       true,
+      assigned:      savedLeads.length,
+      totalFound:    allResults.length,
+      freshFound:    freshResumes.length,
+      message:       `${savedLeads.length} fresh lead${savedLeads.length !== 1 ? 's' : ''} found and assigned to you from "${city}".`,
+      leads:         savedLeads,
+    });
+
+  } catch (err) {
+    console.error('[AgentSelfSearch] Error:', err.message);
+    res.status(500).json({ error: err.message, success: false });
+  }
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 
