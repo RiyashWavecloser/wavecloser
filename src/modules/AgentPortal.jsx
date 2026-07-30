@@ -80,7 +80,7 @@ export default function AgentPortal({ currentUser, onLogout }) {
     if (isSupervisor) {
       const agentFilter = supervisorAgent === 'all' ? null : supervisorAgent;
       const live = await fetchAllAgentLeadsAPI(agentFilter);
-      if (live && live.length) {
+      if (live !== null) {
         setLeads(live);
         setIsDemo(false);
       } else if (leads.length === 0) {
@@ -89,7 +89,7 @@ export default function AgentPortal({ currentUser, onLogout }) {
       return;
     }
     const live = await fetchMyLeadsAPI();
-    if (live && live.length) {
+    if (live !== null) {
       if (leads.length > 0 && live.length > leads.length) {
         showToast(`${live.length - leads.length} new lead(s) assigned to you!`, 'info');
       }
