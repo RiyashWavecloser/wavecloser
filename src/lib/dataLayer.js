@@ -679,7 +679,12 @@ export async function bulkAssignResumeLeadsAPI(resumes, agentName, market) {
   }
 }
 
-export async function bulkAssignResumes({ city, keywords, agentNames, countPerAgent }) {
+export async function bulkAssignResumes({ cities, city, keywords, agentNames, countPerAgent }) {
+  // Accept either cities[] (new multi-city) or legacy city string
+  const citiesArray = cities && cities.length > 0
+    ? cities
+    : city ? [city] : [];
+
   if (!PROXY) {
     // Demo mode — simulate result
     await new Promise(r => setTimeout(r, 2000));
@@ -688,11 +693,12 @@ export async function bulkAssignResumes({ city, keywords, agentNames, countPerAg
       totalAssigned: agentNames.length * countPerAgent,
       freshFound: agentNames.length * countPerAgent,
       totalFound: agentNames.length * countPerAgent + 10,
+      citiesSearched: citiesArray,
       summary: agentNames.map(name => ({ agent: name, assigned: countPerAgent })),
     };
   }
   try {
-    return await post('/api/resume-leads/bulk-assign', { city, keywords, agentNames, countPerAgent });
+    return await post('/api/resume-leads/bulk-assign', { cities: citiesArray, keywords, agentNames, countPerAgent });
   } catch (e) {
     return { success: false, message: e.message };
   }
@@ -709,5 +715,41 @@ export async function agentSelfSearchAndClaim(city, keywords, count = 20) {
     return await post('/api/resume-leads/agent-self-search', { city, keywords, count });
   } catch (e) {
     return { success: false, message: e.message, assigned: 0, leads: [] };
+  }
+}
+
+// ─── Notifications (Req 4) ────────────────────────────────────────────────────
+
+/**
+ * Fetch the calling agent's notifications (newest first, last 50).
+ * Returns { notifications[], unreadCount, demo }.
+ */
+export async function fetchMyNotifications() {
+  try {
+    return await get('/api/notifications/my');
+  } catch {
+    return { notifications: [], unreadCount: 0, demo: true };
+  }
+}
+
+/**
+ * Mark all of the calling agent's unread notifications as read.
+ */
+export async function markAllNotificationsRead() {
+  try {
+    return await patch('/api/notifications/read-all', {});
+  } catch {
+    return { ok: false, demo: true };
+  }
+}
+
+/**
+ * Mark a single notification as read by its Airtable record ID.
+ */
+export async function markNotificationRead(id) {
+  try {
+    return await patch(`/api/notifications/${encodeURIComponent(id)}/read`, {});
+  } catch {
+    return { ok: false, demo: true };
   }
 }

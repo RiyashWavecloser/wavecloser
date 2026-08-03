@@ -246,6 +246,8 @@ function recordToLead(r) {
     market:             r.get('Market')              || '',
     createdAt:          r.get('CreatedAt')           || '',
     generatedBy:        r.get('GeneratedBy')         || '',
+    // Callback scheduling (Req 2)
+    callbackAt:         r.get('CallbackAt')          || null,
     // Partner assignment fields
     assignedPartnerID:  r.get('AssignedPartnerID')   || '',
     assignedPartnerAt:  r.get('AssignedPartnerAt')   || null,
@@ -282,6 +284,7 @@ function leadToFields(l) {
   if (l.market             !== undefined) f['Market']             = l.market;
   if (l.createdAt          !== undefined) f['CreatedAt']          = l.createdAt;
   if (l.generatedBy        !== undefined) f['GeneratedBy']        = l.generatedBy;
+  if (l.callbackAt         !== undefined) f['CallbackAt']         = l.callbackAt;  // Req 2
   if (l.assignedPartnerID  !== undefined) f['AssignedPartnerID']  = l.assignedPartnerID;
   if (l.assignedPartnerAt  !== undefined) f['AssignedPartnerAt']  = l.assignedPartnerAt;
   if (l.qualifierNotifiedAt !== undefined) f['QualifierNotifiedAt'] = l.qualifierNotifiedAt;
@@ -1676,3 +1679,130 @@ export async function verifyAirtableTables() {
   }
 }
 
+// ─── Single Lead Assignment (for daily cron) ─────────────────────────────────
+
+/**
+ * Assign a single lead (by Airtable record ID) to an agent.
+ * Used by the morning/midday cron distribution (Req 3).
+ */
+export async function assignLeadToAgent(leadAirtableId, agentName) {
+  if (!isConfigured()) return;
+  return retry(async () => {
+    await base()('Leads').update(leadAirtableId, {
+      Status:        'Assigned',
+      AssignedAgent: agentName,
+    });
+  });
+}
+
+// ─── Notifications Table (Req 4) ─────────────────────────────────────────────
+// Table must be created manually in Airtable:
+//   RecipientEmail (Single line text)
+//   Type           (Single select: new_leads_assigned, callback_due, system)
+//   Title          (Single line text)
+//   Message        (Long text)
+//   IsRead         (Checkbox, default false)
+//   CreatedAt      (Date/time)
+
+function recordToNotification(r) {
+  return {
+    id:             r.id,
+    recipientEmail: r.get('RecipientEmail') || '',
+    type:           r.get('Type')           || 'system',
+    title:          r.get('Title')          || '',
+    message:        r.get('Message')        || '',
+    isRead:         !!r.get('IsRead'),
+    createdAt:      r.get('CreatedAt')      || new Date().toISOString(),
+  };
+}
+
+/**
+ * Create a new in-app notification for an agent.
+ * Called by automationWorker after assigning leads.
+ */
+export async function createNotification({ recipientEmail, type = 'new_leads_assigned', title, message }) {
+  if (!isConfigured()) {
+    console.log(`[notif] Demo mode — skipping createNotification for ${recipientEmail}`);
+    return null;
+  }
+  try {
+    const rec = await retry(() =>
+      base()('Notifications').create({
+        RecipientEmail: recipientEmail,
+        Type:           type,
+        Title:          title,
+        Message:        message,
+        IsRead:         false,
+        CreatedAt:      new Date().toISOString(),
+      })
+    );
+    return recordToNotification(rec);
+  } catch (err) {
+    // Graceful degradation — Notifications table may not exist yet
+    console.warn('[airtable] createNotification error (table may not exist yet):', err.message);
+    return null;
+  }
+}
+
+/**
+ * Fetch notifications for a specific agent email.
+ * Returns { notifications, unreadCount }.
+ */
+export async function fetchNotifications(recipientEmail) {
+  if (!isConfigured()) return { notifications: [], unreadCount: 0 };
+  try {
+    const records = await retry(() =>
+      base()('Notifications')
+        .select({
+          filterByFormula: `{RecipientEmail} = "${recipientEmail}"`,
+          sort: [{ field: 'CreatedAt', direction: 'desc' }],
+          maxRecords: 50,
+        })
+        .all()
+    );
+    const notifications = records.map(recordToNotification);
+    const unreadCount = notifications.filter(n => !n.isRead).length;
+    return { notifications, unreadCount };
+  } catch (err) {
+    console.warn('[airtable] fetchNotifications error:', err.message);
+    return { notifications: [], unreadCount: 0 };
+  }
+}
+
+/**
+ * Mark ALL notifications as read for a given agent email.
+ */
+export async function markNotificationsRead(recipientEmail) {
+  if (!isConfigured()) return;
+  try {
+    const records = await retry(() =>
+      base()('Notifications')
+        .select({
+          filterByFormula: `AND({RecipientEmail} = "${recipientEmail}", {IsRead} = FALSE())`,
+        })
+        .all()
+    );
+    if (!records.length) return;
+    const chunks = [];
+    for (let i = 0; i < records.length; i += 10) chunks.push(records.slice(i, i + 10));
+    for (const chunk of chunks) {
+      await retry(() =>
+        base()('Notifications').update(chunk.map(r => ({ id: r.id, fields: { IsRead: true } })))
+      );
+    }
+  } catch (err) {
+    console.warn('[airtable] markNotificationsRead error:', err.message);
+  }
+}
+
+/**
+ * Mark a single notification as read by its Airtable record ID.
+ */
+export async function markNotificationRead(id) {
+  if (!isConfigured()) return;
+  try {
+    await retry(() => base()('Notifications').update(id, { IsRead: true }));
+  } catch (err) {
+    console.warn('[airtable] markNotificationRead error:', err.message);
+  }
+}

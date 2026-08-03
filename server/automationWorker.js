@@ -28,12 +28,15 @@ import {
   getLeads,
   getUnassignedLeads,
   assignLeadsToAgent,
+  assignLeadToAgent,
   getMondayOfCurrentWeek,
   listAgents,
   // Resume Lead Distribution (Workflow C)
   getRecruitingAgents,
   getGlobalResumeDeduplicationSet,
   bulkAssignResumeLeads,
+  // Notifications (Req 4)
+  createNotification,
 } from './airtableClient.js';
 import {
   sendEmail,
@@ -391,9 +394,131 @@ async function generateWeeklyLeadReport() {
   }
 }
 
-// ─── Cron jobs ────────────────────────────────────────────────────────────────
+// ─── Daily Lead Distribution (Req 3) ─────────────────────────────────────────
+
+/**
+ * Distribute fresh leads to all cold-calling agents using round-robin.
+ * Called by the morning cron (8AM EST) and midday cron (12PM EST).
+ * @param {'morning'|'midday'} session
+ */
+async function distributeDailyLeads(session) {
+  if (!airtableReady()) {
+    console.log('[Worker] Airtable not configured — skipping daily lead distribution');
+    return;
+  }
+
+  const today      = new Date().toISOString().split('T')[0];
+  const perAgent   = session === 'morning'
+    ? parseInt(process.env.MORNING_LEADS_PER_AGENT) || 60
+    : parseInt(process.env.MIDDAY_LEADS_PER_AGENT)  || 40;
+
+  // Get all cold-calling agents (from Airtable Staff table, role = cold_caller)
+  const agents = await listAgents().catch(() => []);
+  const coldCallers = agents.filter(a => a.role === 'cold_caller' || a.role === 'independent_rep' || a.role === 'authorized_reseller');
+  if (!coldCallers.length) {
+    await appendLog({ task: `${session} distribution skipped`, target: 'No agents found in Staff table', status: 'alert' }).catch(() => {});
+    return;
+  }
+
+  console.log(`[Worker] ${session}: distributing ${perAgent} leads to ${coldCallers.length} agents`);
+
+  // Get unassigned leads from Leads table
+  const needed    = coldCallers.length * perAgent * 2; // fetch 2x buffer
+  const unassigned = await getUnassignedLeads(needed);
+
+  if (!unassigned.length) {
+    await appendLog({
+      task:   `${session} distribution — no fresh leads`,
+      target: 'All markets — generate more leads from Lead Generation module',
+      status: 'alert',
+    }).catch(() => {});
+    console.warn(`[Worker] ${session}: no unassigned leads available`);
+    return;
+  }
+
+  console.log(`[Worker] ${session}: ${unassigned.length} unassigned leads available`);
+
+  // Round-robin distribution
+  const buckets = {};
+  coldCallers.forEach(a => { buckets[a.name] = []; });
+  let pool = [...unassigned];
+  let idx  = 0;
+
+  while (pool.length > 0) {
+    const agent = coldCallers[idx % coldCallers.length];
+    if (buckets[agent.name].length < perAgent) {
+      buckets[agent.name].push(pool.shift());
+    }
+    idx++;
+    if (coldCallers.every(a => buckets[a.name].length >= perAgent)) break;
+  }
+
+  // Save assignments + create in-app notifications
+  for (const agent of coldCallers) {
+    const batch = buckets[agent.name];
+    if (!batch.length) continue;
+
+    // Assign each lead in Airtable
+    for (const lead of batch) {
+      if (lead._airtableId) {
+        await assignLeadToAgent(lead._airtableId, agent.name).catch(err =>
+          console.error(`[Worker] assignLeadToAgent error for ${agent.name}:`, err.message)
+        );
+      }
+    }
+
+    // Create in-app notification
+    const sessionLabel = session === 'morning' ? 'morning' : 'midday';
+    await createNotification({
+      recipientEmail: agent.email,
+      type:           'new_leads_assigned',
+      title:          `${batch.length} new leads assigned to you`,
+      message:        `Your ${sessionLabel} leads are ready. You have ${batch.length} new businesses to call.`,
+    }).catch(err => console.warn(`[Worker] createNotification error for ${agent.name}:`, err.message));
+
+    // Optional email notification (off by default)
+    if (process.env.NOTIFY_AGENTS_BY_EMAIL === 'true' && agent.email) {
+      const frontendUrl = process.env.FRONTEND_URL || 'https://waveclosers-frontend-production.up.railway.app';
+      await sendEmail({
+        to:      agent.email,
+        subject: `You have ${batch.length} new leads ready — Wave Closers`,
+        text:    `Hi ${agent.name},\n\nYour ${sessionLabel} leads are ready. You have ${batch.length} new businesses to call today.\n\nLog in now: ${frontendUrl}\n\nWave Closers Operations`,
+      }).catch(err => console.warn(`[Worker] Email notify error for ${agent.name}:`, err.message));
+    }
+
+    await appendLog({
+      task:   `${session} leads assigned`,
+      target: `${agent.name} → ${batch.length} leads`,
+      status: 'ok',
+    }).catch(() => {});
+
+    console.log(`[Worker] ${session}: ${agent.name} → ${batch.length} leads assigned`);
+  }
+
+  console.log(`[Worker] ${session} distribution complete — ${today}`);
+}
 
 if (!TEST_MODE) {
+  // Morning distribution — 8:00 AM EST (= 1:00 PM UTC)
+  const morningCron = process.env.MORNING_DISTRIBUTION_TIME || '0 13 * * *';
+  cron.schedule(morningCron, async () => {
+    console.log('[Worker] ⏰ Morning lead distribution...');
+    await distributeDailyLeads('morning').catch(err => {
+      console.error('[Worker] Morning distribution error:', err.message);
+    });
+  });
+  console.log(`[worker] ✓ Morning lead distribution cron scheduled: ${morningCron}`);
+
+  // Midday top-up — 12:00 PM EST (= 5:00 PM UTC)
+  const middayCron = process.env.MIDDAY_DISTRIBUTION_TIME || '0 17 * * *';
+  cron.schedule(middayCron, async () => {
+    console.log('[Worker] ⏰ Midday lead top-up...');
+    await distributeDailyLeads('midday').catch(err => {
+      console.error('[Worker] Midday distribution error:', err.message);
+    });
+  });
+  console.log(`[worker] ✓ Midday lead distribution cron scheduled: ${middayCron}`);
+
   // Onboarding Weekly Report — Monday 7am
   cron.schedule('0 7 * * 1', async () => {
     console.log('[worker] ⏰ Cron: onboarding weekly report');

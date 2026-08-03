@@ -8,6 +8,9 @@ import {
   loadLeadsFromStorage,
   saveLeadsToStorage,
   fetchMyResumeLeads,
+  fetchMyNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
 } from '../lib/dataLayer.js';
 import RecruitingPipelineView from '../components/RecruitingPipelineView.jsx';
 import ResumeLeadsTab from '../components/ResumeLeadsTab.jsx';
@@ -72,6 +75,15 @@ export default function AgentPortal({ currentUser, onLogout }) {
   const [genLoading, setGenLoading] = useState(false);
   const [genResult, setGenResult] = useState(null);
 
+  // Disposition: inline callback date/time picker per lead
+  const [callbackPickerLeadId, setCallbackPickerLeadId] = useState(null);
+  const [callbackPickerValue, setCallbackPickerValue] = useState('');
+
+  // Notifications state (Req 4)
+  const [notifications, setNotifications]   = useState([]);
+  const [unreadCount, setUnreadCount]       = useState(0);
+  const [notifOpen, setNotifOpen]           = useState(false);
+
   const WEEKLY_TARGET = 500;
   const DAILY_TARGET  = 100;
 
@@ -128,6 +140,34 @@ export default function AgentPortal({ currentUser, onLogout }) {
     if (result && !result.error) {
       setResumeLeads(result.leads || []);
     }
+  }
+
+  // ─── Notifications (Req 4) ───────────────────────────────────────────────────
+  const loadNotifications = useCallback(async () => {
+    if (isSupervisor) return;
+    const data = await fetchMyNotifications();
+    if (data && !data.demo) {
+      setNotifications(data.notifications || []);
+      setUnreadCount(data.unreadCount || 0);
+    }
+  }, [isSupervisor]);
+
+  useEffect(() => {
+    loadNotifications();
+    const interval = setInterval(loadNotifications, 30000);
+    return () => clearInterval(interval);
+  }, [loadNotifications]);
+
+  async function handleMarkAllRead() {
+    await markAllNotificationsRead();
+    setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+    setUnreadCount(0);
+  }
+
+  async function handleMarkOneRead(notif) {
+    await markNotificationRead(notif.id);
+    setNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, isRead: true } : n));
+    setUnreadCount(prev => Math.max(0, prev - 1));
   }
 
   // ─── Toast ──────────────────────────────────────────────────────────────────
@@ -191,20 +231,29 @@ export default function AgentPortal({ currentUser, onLogout }) {
   const historyList = useMemo(() => leads.filter(l => l.outcome), [leads]);
 
   // ─── Lead actions ───────────────────────────────────────────────────────────
-  async function handleOutcome(lead, outcome) {
+  async function handleOutcome(lead, outcome, callbackAt = null) {
     const now = new Date().toISOString();
+    const patch = {
+      outcome,
+      calledAt: now,
+      status: outcome === 'Interested' ? 'Interested' : outcome,
+    };
+    if (callbackAt) patch.callbackAt = callbackAt;
+
     setLeads(prev => prev.map(l =>
-      l.placeId === lead.placeId
-        ? { ...l, outcome, status: outcome === 'Interested' ? 'SentToQualifier' : outcome, calledAt: now }
-        : l
+      l.placeId === lead.placeId ? { ...l, ...patch } : l
     ));
     await updateLeadAPI(lead.placeId, {
-      status: outcome === 'Interested' ? 'Interested' : outcome,
-      outcome, calledAt: now,
+      ...patch,
       agentNotes: lead.agentNotes || '',
     });
+
     if (outcome === 'Interested') showToast(`${lead.businessName} → Interested! Qualifier notified.`, 'success');
+    else if (outcome === 'Callback') showToast(`${lead.businessName} → Callback scheduled`, 'info');
     else showToast(`${lead.businessName} → ${outcome}`, 'info');
+
+    setCallbackPickerLeadId(null);
+    setCallbackPickerValue('');
     setLeads(prev => { saveLeadsToStorage(prev); return prev; });
   }
 
@@ -251,7 +300,17 @@ export default function AgentPortal({ currentUser, onLogout }) {
 
   // ─── Lead Card ──────────────────────────────────────────────────────────────
   const renderLeadCard = (lead, index) => {
-    const borderColor = lead.outcome === 'Interested' ? '#2D9B5E' : lead.outcome === 'NotInterested' ? '#D44A4A' : lead.outcome === 'Callback' ? '#D49A2B' : lead.outcome === 'NoAnswer' ? '#999' : '#5B8DEF';
+    const borderColor = lead.outcome === 'Interested' ? '#2D9B5E'
+      : lead.outcome === 'NotInterested' ? '#D44A4A'
+      : lead.outcome === 'Callback' ? '#D49A2B'
+      : lead.outcome === 'NoAnswer' ? '#999'
+      : lead.outcome === 'LeftVoicemail' ? '#7B6FDB'
+      : lead.outcome === 'DoNotCall' ? '#555'
+      : '#5B8DEF';
+
+    const showCallbackPicker = callbackPickerLeadId === lead.placeId;
+    const isCallbackDueNow = lead.outcome === 'Callback' && lead.callbackAt && new Date(lead.callbackAt) <= new Date();
+
     return (
       <div key={lead.placeId} style={{ ...S.leadCard, borderLeft: `4px solid ${borderColor}` }}>
         <div style={S.leadHeader}>
@@ -273,6 +332,16 @@ export default function AgentPortal({ currentUser, onLogout }) {
         </div>
         {lead.scoreReason && <div style={S.scoreReason}>{lead.scoreReason}</div>}
 
+        {/* Callback due badge */}
+        {isCallbackDueNow && (
+          <div style={{ background: '#FFF3CD', border: '1px solid #FFB347', borderRadius: 6, padding: '6px 10px', fontSize: 12, fontWeight: 700, color: '#7A4F00', marginBottom: 8 }}>
+            ⏰ Callback due{new Date(lead.callbackAt).toDateString() === new Date().toDateString() ? ' today' : ` — ${new Date(lead.callbackAt).toLocaleString()}`}
+          </div>
+        )}
+        {lead.outcome === 'Callback' && lead.callbackAt && !isCallbackDueNow && (
+          <div style={{ fontSize: 12, color: '#8A5A1A', marginBottom: 6 }}>📞 Scheduled: {new Date(lead.callbackAt).toLocaleString()}</div>
+        )}
+
         {!isSupervisor && (
           <>
             <input
@@ -283,21 +352,56 @@ export default function AgentPortal({ currentUser, onLogout }) {
             />
             {!lead.outcome ? (
               <div style={S.actionRow}>
-                <button onClick={() => handleOutcome(lead, 'Interested')}  style={{ ...S.actionBtn, background: '#2D9B5E', color: '#fff' }}>✅ Interested</button>
+                <button onClick={() => handleOutcome(lead, 'Interested')}  style={{ ...S.actionBtn, background: '#2D9B5E', color: '#fff' }}>✅ Yes</button>
                 <button onClick={() => handleOutcome(lead, 'NotInterested')} style={{ ...S.actionBtn, background: '#D44A4A', color: '#fff' }}>❌ No</button>
-                <button onClick={() => handleOutcome(lead, 'Callback')}    style={{ ...S.actionBtn, background: '#D49A2B', color: '#fff' }}>📞 CB</button>
-                <button onClick={() => handleOutcome(lead, 'NoAnswer')}    style={{ ...S.actionBtn, background: '#888', color: '#fff' }}>🔇</button>
+                <button
+                  onClick={() => { setCallbackPickerLeadId(lead.placeId); setCallbackPickerValue(''); }}
+                  style={{ ...S.actionBtn, background: '#D49A2B', color: '#fff' }}
+                >📞 CB</button>
+                <button onClick={() => handleOutcome(lead, 'NoAnswer')}    style={{ ...S.actionBtn, background: '#888', color: '#fff' }}>🔇 NA</button>
+                <button onClick={() => handleOutcome(lead, 'LeftVoicemail')} style={{ ...S.actionBtn, background: '#7B6FDB', color: '#fff', fontSize: 11 }}>📨 VM</button>
+                <button onClick={() => handleOutcome(lead, 'DoNotCall')}  style={{ ...S.actionBtn, background: '#333', color: '#fff', fontSize: 11 }}>🚫 DNC</button>
               </div>
             ) : (
-              <div style={{ ...S.outcomeBadge, background: lead.outcome === 'Interested' ? '#E8F4EA' : lead.outcome === 'NotInterested' ? '#FBE5E5' : lead.outcome === 'Callback' ? '#FBF1DD' : '#F0F0F0', color: lead.outcome === 'Interested' ? '#1F6E3C' : lead.outcome === 'NotInterested' ? '#9B2727' : lead.outcome === 'Callback' ? '#8A5A1A' : '#666' }}>
-                {lead.outcome === 'Interested' ? '✅ Interested — Qualifier notified' : lead.outcome === 'NotInterested' ? '❌ Not Interested' : lead.outcome === 'Callback' ? '📞 Callback scheduled' : '🔇 No Answer'}
+              <div style={{
+                ...S.outcomeBadge,
+                background: lead.outcome === 'Interested' ? '#E8F4EA' : lead.outcome === 'NotInterested' ? '#FBE5E5' : lead.outcome === 'Callback' ? '#FBF1DD' : lead.outcome === 'LeftVoicemail' ? '#EEE9FF' : lead.outcome === 'DoNotCall' ? '#F0F0F0' : '#F0F0F0',
+                color: lead.outcome === 'Interested' ? '#1F6E3C' : lead.outcome === 'NotInterested' ? '#9B2727' : lead.outcome === 'Callback' ? '#8A5A1A' : lead.outcome === 'LeftVoicemail' ? '#4A3A99' : '#555',
+              }}>
+                {lead.outcome === 'Interested' ? '✅ Interested — Qualifier notified'
+                  : lead.outcome === 'NotInterested' ? '❌ Not Interested'
+                  : lead.outcome === 'Callback' ? '📞 Callback scheduled'
+                  : lead.outcome === 'NoAnswer' ? '🔇 No Answer'
+                  : lead.outcome === 'LeftVoicemail' ? '📨 Left Voicemail'
+                  : lead.outcome === 'DoNotCall' ? '🚫 Do Not Call'
+                  : lead.outcome}
+              </div>
+            )}
+
+            {/* Inline callback datetime picker */}
+            {showCallbackPicker && (
+              <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <input
+                  type="datetime-local"
+                  value={callbackPickerValue}
+                  onChange={e => setCallbackPickerValue(e.target.value)}
+                  style={{ flex: 1, padding: '8px 10px', borderRadius: 6, border: '1px solid #D49A2B', fontSize: 13, fontFamily: 'inherit', minWidth: 180 }}
+                />
+                <button
+                  onClick={() => handleOutcome(lead, 'Callback', callbackPickerValue || null)}
+                  style={{ padding: '8px 16px', background: '#D49A2B', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+                >✓ Save</button>
+                <button
+                  onClick={() => { setCallbackPickerLeadId(null); setCallbackPickerValue(''); }}
+                  style={{ padding: '8px 12px', background: '#EEE', color: '#555', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit' }}
+                >Cancel</button>
               </div>
             )}
           </>
         )}
         {isSupervisor && lead.outcome && (
           <div style={{ ...S.outcomeBadge, background: lead.outcome === 'Interested' ? '#E8F4EA' : lead.outcome === 'NotInterested' ? '#FBE5E5' : lead.outcome === 'Callback' ? '#FBF1DD' : '#F0F0F0', color: lead.outcome === 'Interested' ? '#1F6E3C' : lead.outcome === 'NotInterested' ? '#9B2727' : lead.outcome === 'Callback' ? '#8A5A1A' : '#666' }}>
-            {lead.outcome === 'Interested' ? '✅ Interested' : lead.outcome === 'NotInterested' ? '❌ Not Interested' : lead.outcome === 'Callback' ? '📞 Callback' : '🔇 No Answer'}
+            {lead.outcome === 'Interested' ? '✅ Interested' : lead.outcome === 'NotInterested' ? '❌ Not Interested' : lead.outcome === 'Callback' ? '📞 Callback' : lead.outcome === 'LeftVoicemail' ? '📨 Voicemail' : lead.outcome === 'DoNotCall' ? '🚫 DNC' : '🔇 No Answer'}
           </div>
         )}
       </div>
@@ -418,6 +522,46 @@ export default function AgentPortal({ currentUser, onLogout }) {
           </div>
         )}
         <div style={S.headerRight}>
+          {/* 🔔 Notification Bell */}
+          {!isSupervisor && (
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={() => setNotifOpen(o => !o)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#fff', fontSize: 20, position: 'relative', padding: '4px 6px', lineHeight: 1 }}
+                title="Notifications"
+              >
+                🔔
+                {unreadCount > 0 && (
+                  <span style={{ position: 'absolute', top: 0, right: 0, background: '#D44A4A', color: '#fff', fontSize: 9, fontWeight: 800, borderRadius: '50%', width: 15, height: 15, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
+              </button>
+              {notifOpen && (
+                <div style={{ position: 'absolute', right: 0, top: 38, width: 300, maxHeight: 340, overflowY: 'auto', background: '#fff', borderRadius: 10, border: '1px solid #DDD', boxShadow: '0 8px 32px rgba(0,0,0,0.2)', zIndex: 200 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', borderBottom: '1px solid #EEE' }}>
+                    <span style={{ fontWeight: 800, fontSize: 13, color: '#1A1A1A' }}>Notifications</span>
+                    {unreadCount > 0 && (
+                      <button onClick={handleMarkAllRead} style={{ background: 'none', border: 'none', color: '#5B8DEF', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}>Mark all read</button>
+                    )}
+                  </div>
+                  {notifications.length === 0 ? (
+                    <div style={{ padding: '20px 12px', color: '#888', fontSize: 13, textAlign: 'center' }}>No notifications yet</div>
+                  ) : notifications.map(n => (
+                    <div
+                      key={n.id}
+                      onClick={() => !n.isRead && handleMarkOneRead(n)}
+                      style={{ padding: '10px 12px', borderBottom: '1px solid #F5F5F5', background: n.isRead ? '#fff' : '#F0F5FF', cursor: n.isRead ? 'default' : 'pointer' }}
+                    >
+                      <div style={{ fontSize: 13, fontWeight: n.isRead ? 400 : 700, color: '#1A1A1A', marginBottom: 2 }}>{n.title}</div>
+                      <div style={{ fontSize: 12, color: '#666' }}>{n.message}</div>
+                      <div style={{ fontSize: 10, color: '#AAA', marginTop: 3 }}>{new Date(n.createdAt).toLocaleString()}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <span style={S.headerAgent}>{agentName}</span>
           <button onClick={onLogout} style={S.logoutBtn}>→ Logout</button>
         </div>
@@ -484,6 +628,21 @@ export default function AgentPortal({ currentUser, onLogout }) {
       {/* Progress card (agents only) */}
       {!isSupervisor && (
         <div style={S.progressCard}>
+          {/* Callbacks Due Today banner */}
+          {(() => {
+            const todayCallbacks = leads.filter(l => {
+              if (l.outcome !== 'Callback' || !l.callbackAt) return false;
+              const d = new Date(l.callbackAt);
+              return d.toDateString() === new Date().toDateString() || d < new Date();
+            });
+            return todayCallbacks.length > 0 ? (
+              <div style={{ background: '#FFF3CD', border: '1px solid #FFB347', borderRadius: 8, padding: '10px 14px', marginBottom: 12, fontSize: 13, fontWeight: 700, color: '#7A4F00', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>⏰ {todayCallbacks.length} callback{todayCallbacks.length !== 1 ? 's' : ''} due today or overdue</span>
+                <button onClick={() => setFilter('callbacks')} style={{ background: '#D49A2B', color: '#fff', border: 'none', borderRadius: 6, padding: '4px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>View</button>
+              </div>
+            ) : null;
+          })()}
+
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
             <div style={S.progressLabel}>Weekly Progress</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: weeklyCalledCount >= WEEKLY_TARGET ? '#E8F4EA' : '#FFF3E0', padding: '6px 14px', borderRadius: 20, border: weeklyCalledCount >= WEEKLY_TARGET ? '1px solid #81C784' : '1px solid #FFB74D' }}>

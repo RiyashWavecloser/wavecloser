@@ -412,7 +412,7 @@ const S = {
   progressBarInner: { height: '100%', background: 'linear-gradient(90deg, #1F4E79, #2D9B5E)', borderRadius: 5, transition: 'width 0.4s ease' },
   filterBar:      { display: 'flex', gap: 6, padding: '12px 20px 10px', overflowX: 'auto', scrollbarWidth: 'none' },
   filterBtn:      { padding: '7px 14px', borderRadius: 20, border: '1px solid #DDD', background: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', color: '#555', whiteSpace: 'nowrap', flexShrink: 0, transition: 'all 0.15s' },
-  filterBtnActive: { background: '#1F4E79', color: '#fff', borderColor: '#1F4E79' },
+  filterBtnActive: { background: '#1F4E79', color: '#fff', border: '1px solid #1F4E79' },
   emptyState:     { textAlign: 'center', padding: '48px 20px', color: '#888', fontSize: 14, lineHeight: 1.6 },
   ctaBtn:         { display: 'inline-block', padding: '12px 24px', background: 'linear-gradient(135deg, #1F4E79, #2D9B5E)', color: '#fff', border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' },
   list:           { padding: '0 20px', display: 'flex', flexDirection: 'column', gap: 10 },

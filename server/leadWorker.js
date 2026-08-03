@@ -47,6 +47,29 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // normalizePhone is imported from airtableClient — do NOT redefine here
 
+// ─── Multi-Keyword Search Config ─────────────────────────────────────────────
+
+/**
+ * Search keyword variations — each is searched separately via Google Places to
+ * dramatically increase lead volume per city. Results are deduplicated by
+ * PlaceID + phone before scoring, so no double-counting.
+ */
+export const LEAD_KEYWORDS = [
+  'restaurant',
+  'restaurant bar',
+  'cafe coffee shop',
+  'nail salon beauty',
+  'hair salon barbershop',
+  'massage spa',
+  'deli food',
+  'small business retail',
+  'flower shop boutique',
+  'pizza wings fast food',
+];
+
+/** Default max leads per generation run (server-side cap). Was 50, now 500. */
+export const DEFAULT_MAX_LEADS = 500;
+
 // ─── Google Places API ────────────────────────────────────────────────────────
 
 const GOOGLE_TEXT_SEARCH_URL = 'https://maps.googleapis.com/maps/api/place/textsearch/json';
@@ -322,7 +345,7 @@ async function scoreLeads(leads) {
  *   maxLeads — maximum number of fresh leads to score and save (server-side cap applied upstream, default 50).
  * @returns {Promise<{ leads: object[], stats: object, demo: boolean }>}
  */
-export async function generateLeads({ location, businessTypes, radius = 5, requestedByAgent = null, maxLeads = 50 }) {
+export async function generateLeads({ location, businessTypes, radius = 5, requestedByAgent = null, maxLeads = DEFAULT_MAX_LEADS }) {
   // If no API keys at all, return seed data immediately
   const hasGoogle = !!GOOGLE_KEY;
   const hasYelp   = !!YELP_KEY;
@@ -365,15 +388,43 @@ export async function generateLeads({ location, businessTypes, radius = 5, reque
     small_retail: 'retail store',
   };
 
-  // STEP 2 — PRIMARY SOURCE: Google Places
+  // STEP 2 — PRIMARY SOURCE: Google Places (multi-keyword search)
   if (hasGoogle) {
-    console.log('  [leads] Searching Google Places (primary source)...');
+    console.log('  [leads] Searching Google Places (primary source, multi-keyword)...');
+    // Search each LEAD_KEYWORD variation separately for maximum coverage
+    for (const keyword of LEAD_KEYWORDS) {
+      if (allGoogle.length >= maxLeads * 3) {
+        console.log(`  [leads] Google Places: buffer full (${allGoogle.length} results), stopping keyword loop`);
+        break;
+      }
+      const google = await searchGooglePlaces(keyword, location, radius);
+      // Tag each result with best-matching businessType from caller's list
+      const tagged = google.map(r => {
+        const matchedType = businessTypes.find(t => {
+          const label = (typeLabels[t] || t).toLowerCase();
+          return keyword.toLowerCase().includes(label) || label.includes(keyword.toLowerCase().split(' ')[0]);
+        }) || businessTypes[0] || 'restaurant';
+        return { ...r, type: matchedType };
+      });
+      allGoogle.push(...tagged);
+      console.log(`  [leads] Keyword "${keyword}": ${google.length} results (total: ${allGoogle.length})`);
+      await sleep(1000); // Google requires 1s between requests
+    }
+    // Also search by original business types (for type-specific results)
     for (const type of businessTypes) {
+      if (allGoogle.length >= maxLeads * 3) break;
       const label = typeLabels[type] || type;
       const google = await searchGooglePlaces(label, location, radius);
       allGoogle.push(...google.map(r => ({ ...r, type })));
-      await sleep(1000); // Google requires 1s between requests
+      await sleep(1000);
     }
+    // Deduplicate allGoogle by placeId before fetching details
+    const seenGoogleIds = new Set();
+    allGoogle = allGoogle.filter(r => {
+      if (!r.placeId || seenGoogleIds.has(r.placeId)) return false;
+      seenGoogleIds.add(r.placeId);
+      return true;
+    });
     // Fetch phone + website from Google Place Details for all Google results
     for (const lead of allGoogle) {
       if (!lead.phone && lead.placeId) {
@@ -383,7 +434,7 @@ export async function generateLeads({ location, businessTypes, radius = 5, reque
         await sleep(200);
       }
     }
-    console.log(`  [leads] Google Places: ${allGoogle.length} total results`);
+    console.log(`  [leads] Google Places: ${allGoogle.length} total unique results (multi-keyword)`);
   } else {
     console.log('  [leads] ⚠ GOOGLE_PLACES_API_KEY not set — skipping primary source');
   }

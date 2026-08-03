@@ -62,6 +62,10 @@ import {
   saveResumeLead,
   registerResumeAsAssigned,
   verifyAirtableTables,
+  // Notifications (Req 4)
+  fetchNotifications,
+  markNotificationsRead,
+  markNotificationRead,
 } from './airtableClient.js';
 import { generateLeads } from './leadWorker.js';
 import {
@@ -555,6 +559,8 @@ async function handleLeadPatch(req, res) {
     'status', 'assignedAgent', 'calledAt', 'outcome',
     'address', 'type', 'phone', 'website', 'rating', 'reviewCount',
     'score', 'scoreReason', 'businessName', 'placeId', 'market', 'createdAt', 'generatedBy',
+    'callbackAt', // Req 2 — callback scheduling
+    'agentNotes',
   ]);
   const leadSafePatch = {};
   for (const [key, val] of Object.entries(patch)) {
@@ -1376,7 +1382,12 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
     }
   }
 
-  // Payload Case 2 — Auto search & round-robin payload: { city, keywords, agentNames[], countPerAgent }
+  // Payload Case 2 — Auto search & round-robin payload: { cities[], keywords, agentNames[], countPerAgent }
+  // Now accepts 'cities' array (multi-city) OR legacy 'city' string
+  const citiesInput = Array.isArray(req.body.cities) && req.body.cities.length > 0
+    ? req.body.cities
+    : [city];  // fall back to legacy single city
+
   const targetAgents = Array.isArray(agentNames) && agentNames.length > 0
     ? agentNames
     : (agentName ? [agentName] : []);
@@ -1388,14 +1399,33 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
   try {
     const today = new Date().toISOString().split('T')[0];
 
-    // Step 1 — Fetch fresh resumes from Craigslist
-    console.log(`[BulkAssign] Fetching resumes for ${city}...`);
-    const allResults = await searchCraigslistResumes(city, keywords, targetAgents.length * countPerAgent * 2);
+    // Step 1 — Fetch fresh resumes from ALL selected cities
+    console.log(`[BulkAssign] Fetching resumes for ${citiesInput.length} cities: ${citiesInput.join(', ')}`);
+    let allResults = [];
+    const perCityBreakdown = {};
+
+    for (const cityEntry of citiesInput) {
+      const cityResults = await searchCraigslistResumes(cityEntry, keywords, targetAgents.length * countPerAgent * 2);
+      perCityBreakdown[cityEntry] = cityResults.length;
+      allResults = [...allResults, ...cityResults.map(r => ({ ...r, market: cityEntry }))];
+      console.log(`[BulkAssign] ${cityEntry}: ${cityResults.length} results`);
+    }
+
+    // Deduplicate across cities
+    const crossCitySeen = new Set();
+    allResults = allResults.filter(r => {
+      const key = (r.link || r.phone || r.title || '').toLowerCase();
+      if (!key || crossCitySeen.has(key)) return false;
+      crossCitySeen.add(key);
+      return true;
+    });
+
+    console.log(`[BulkAssign] Total unique across ${citiesInput.length} cities: ${allResults.length}`);
 
     if (allResults.length === 0) {
       return res.status(200).json({
         success: false,
-        message: `No resumes found for "${city}" with keywords "${keywords}". Try a different city or keywords.`,
+        message: `No resumes found for the selected cities with keywords "${keywords}". Try different cities or keywords.`,
         assigned: 0,
       });
     }
@@ -1409,12 +1439,18 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
       return url && !globalDedupeSet.has(url);
     });
 
+    const perCityFreshBreakdown = {};
+    freshResumes.forEach(r => {
+      const m = r.market || 'Unknown';
+      perCityFreshBreakdown[m] = (perCityFreshBreakdown[m] || 0) + 1;
+    });
+
     console.log(`[BulkAssign] ${allResults.length} found → ${freshResumes.length} are fresh`);
 
     if (freshResumes.length === 0) {
       return res.status(200).json({
         success: false,
-        message: `All ${allResults.length} resumes found for "${city}" have already been assigned before. Try a different city or keywords.`,
+        message: `All resumes found across the selected cities have already been assigned. Try different cities or keywords.`,
         assigned: 0,
       });
     }
@@ -1483,11 +1519,20 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
     const totalAssigned = summary.reduce((s, r) => s + r.assigned, 0);
     console.log(`[BulkAssign] Complete — ${totalAssigned} resumes assigned across ${agentNames.length} agents (Round-Robin)`);
 
+    // Per-city breakdown for the result display
+    const perCityResult = Object.entries(perCityFreshBreakdown).map(([city, fresh]) => ({
+      city,
+      found: perCityBreakdown[city] || 0,
+      fresh,
+    }));
+
     res.json({
       success:      true,
       totalAssigned,
       freshFound:   freshResumes.length,
       totalFound:   allResults.length,
+      citiesSearched: citiesInput,
+      perCity:      perCityResult,
       summary,
     });
 
@@ -1600,6 +1645,58 @@ app.post('/api/resume-leads/agent-self-search', requireResumeAccess, async (req,
   } catch (err) {
     console.error('[AgentSelfSearch] Error:', err.message);
     res.status(500).json({ error: err.message, success: false });
+  }
+});
+
+// ─── Agent Portal: self-search ────────────────────────────────────────────────
+
+// ─── Notifications API (Req 4) ────────────────────────────────────────────────
+
+/**
+ * GET /api/notifications/my
+ * Returns the calling agent's notifications (last 50), newest first.
+ */
+app.get('/api/notifications/my', requireAuth, async (req, res) => {
+  const email = req.user.email;
+  if (!airtableReady()) return res.json({ notifications: [], unreadCount: 0, demo: true });
+  try {
+    const result = await fetchNotifications(email);
+    res.json({ ...result, demo: false });
+  } catch (err) {
+    console.error('[proxy] GET /api/notifications/my:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PATCH /api/notifications/read-all
+ * Marks all unread notifications as read for the calling agent.
+ */
+app.patch('/api/notifications/read-all', requireAuth, async (req, res) => {
+  const email = req.user.email;
+  if (!airtableReady()) return res.json({ ok: true, demo: true });
+  try {
+    await markNotificationsRead(email);
+    res.json({ ok: true, demo: false });
+  } catch (err) {
+    console.error('[proxy] PATCH /api/notifications/read-all:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PATCH /api/notifications/:id/read
+ * Marks a single notification as read by Airtable record ID.
+ */
+app.patch('/api/notifications/:id/read', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  if (!airtableReady()) return res.json({ ok: true, demo: true });
+  try {
+    await markNotificationRead(id);
+    res.json({ ok: true, demo: false });
+  } catch (err) {
+    console.error('[proxy] PATCH /api/notifications/:id/read:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
