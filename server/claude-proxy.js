@@ -76,7 +76,7 @@ import {
   buildPartnerLeadEmail,
 } from './emailService.js';
 import { requireAuth, signToken, verifyPassword, hashPassword, requireRole, authenticateAgent, authenticateSupervisor } from './auth.js';
-import { AGENTS, CITY_SUBDOMAINS, DAILY_RESUME_LEADS_PER_WCR, RESUME_SEARCH_KEYWORDS } from './constants.js';
+import { AGENTS, CITY_SUBDOMAINS, DAILY_RESUME_LEADS_PER_WCR, RESUME_SEARCH_KEYWORDS, RESUME_SEARCH_KEYWORDS_LIST } from './constants.js';
 
 dotenv.config();
 
@@ -978,7 +978,7 @@ app.get('/api/resume-leads/craigslist-search', async (req, res) => {
   }
 });
 
-async function searchCraigslistResumes(cityInput, keywords, limit = 50) {
+async function searchCraigslistResumesSingleKeyword(cityInput, keywords, limit = 50) {
   const citySlug = toCraigslistSlug(cityInput);
 
   const APIFY_KEY = process.env.APIFY_API_KEY;
@@ -1003,6 +1003,50 @@ async function searchCraigslistResumes(cityInput, keywords, limit = 50) {
     console.warn('[Craigslist] RSS fallback failed:', rssErr.message);
     return [];
   }
+}
+
+/**
+ * Multi-keyword Craigslist resume search.
+ * Iterates across multiple keywords (e.g. sales, cold calling, telemarketing, customer service)
+ * and deduplicates candidates by link/phone to maximize fresh lead volume.
+ */
+async function searchCraigslistResumes(cityInput, keywordsInput, limit = 50) {
+  // Determine keyword list to search
+  let keywordList = [];
+  if (Array.isArray(keywordsInput) && keywordsInput.length > 0) {
+    keywordList = keywordsInput;
+  } else if (typeof keywordsInput === 'string' && keywordsInput.includes(',')) {
+    keywordList = keywordsInput.split(',').map(k => k.trim()).filter(Boolean);
+  } else if (!keywordsInput || keywordsInput === 'sales' || keywordsInput === 'default' || keywordsInput === 'multi') {
+    keywordList = RESUME_SEARCH_KEYWORDS_LIST;
+  } else {
+    // Single custom keyword phrase (e.g. "appointment setter")
+    keywordList = [keywordsInput.trim()];
+  }
+
+  console.log(`[Craigslist] Multi-keyword resume search for ${cityInput}: ${keywordList.length} keywords (${keywordList.join(', ')})`);
+
+  let allResults = [];
+  const seenUrls = new Set();
+  const perKeywordLimit = Math.max(10, Math.ceil(limit / Math.min(keywordList.length, 5)));
+
+  for (const kw of keywordList) {
+    try {
+      const res = await searchCraigslistResumesSingleKeyword(cityInput, kw, perKeywordLimit);
+      for (const item of res) {
+        const key = (item.link || item.phone || item.title || '').trim().toLowerCase();
+        if (key && !seenUrls.has(key)) {
+          seenUrls.add(key);
+          allResults.push(item);
+        }
+      }
+    } catch (err) {
+      console.warn(`[Craigslist] Search failed for keyword "${kw}" in ${cityInput}:`, err.message);
+    }
+  }
+
+  console.log(`[Craigslist] Total unique resumes found for ${cityInput} across ${keywordList.length} keywords: ${allResults.length}`);
+  return allResults.slice(0, limit);
 }
 
 function toCraigslistSlug(cityInput) {

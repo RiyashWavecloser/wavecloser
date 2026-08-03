@@ -48,7 +48,7 @@ import {
   buildLearningEnrollmentEmail,
   buildTrainingInviteEmail,
 } from './emailService.js';
-import { BENCHMARKS, WEEKLY_LEADS_PER_AGENT, NUM_AGENTS, AGENTS, CITY_SUBDOMAINS, DAILY_RESUME_LEADS_PER_WCR, RESUME_SEARCH_KEYWORDS } from './constants.js';
+import { BENCHMARKS, WEEKLY_LEADS_PER_AGENT, NUM_AGENTS, AGENTS, CITY_SUBDOMAINS, DAILY_RESUME_LEADS_PER_WCR, RESUME_SEARCH_KEYWORDS, RESUME_SEARCH_KEYWORDS_LIST } from './constants.js';
 import { generateLeads } from './leadWorker.js';
 
 dotenv.config();
@@ -785,20 +785,30 @@ async function distributeResumeLeads() {
   const globalDedupeSet = await getGlobalResumeDeduplicationSet();
   console.log(`[Worker] ${globalDedupeSet.size} resume URLs permanently locked`);
 
-  // Step 4 — Fetch fresh resumes from each city
+  // Step 4 — Fetch fresh resumes from each city using multi-keyword search
   let freshResumes = [];
+  const searchKeywords = (process.env.RESUME_SEARCH_KEYWORDS && process.env.RESUME_SEARCH_KEYWORDS !== 'sales')
+    ? [process.env.RESUME_SEARCH_KEYWORDS]
+    : RESUME_SEARCH_KEYWORDS_LIST;
+
+  console.log(`[Worker] Running multi-keyword resume search across ${cities.length} cities with ${searchKeywords.length} keywords`);
+
   for (const citySlug of cities) {
-    try {
-      const results = await workerSearchCraigslist(citySlug, keywords, 100);
-      const newOnly  = results.filter(r => {
-        const url = (r.link || '').trim().toLowerCase();
-        return url && !globalDedupeSet.has(url);
-      });
-      freshResumes = [...freshResumes, ...newOnly.map(r => ({ ...r, market: CITY_SUBDOMAINS[citySlug] || citySlug }))];
-      console.log(`[Worker] ${citySlug}: ${results.length} found, ${newOnly.length} new`);
-    } catch (e) {
-      console.error(`[Worker] Failed ${citySlug}:`, e.message);
+    let cityResults = [];
+    for (const kw of searchKeywords) {
+      try {
+        const results = await workerSearchCraigslist(citySlug, kw, 40);
+        cityResults = [...cityResults, ...results];
+      } catch (e) {
+        console.error(`[Worker] Failed ${citySlug} (kw: ${kw}):`, e.message);
+      }
     }
+    const newOnly = cityResults.filter(r => {
+      const url = (r.link || '').trim().toLowerCase();
+      return url && !globalDedupeSet.has(url);
+    });
+    freshResumes = [...freshResumes, ...newOnly.map(r => ({ ...r, market: CITY_SUBDOMAINS[citySlug] || citySlug }))];
+    console.log(`[Worker] ${citySlug}: ${cityResults.length} total found across ${searchKeywords.length} keywords, ${newOnly.length} fresh`);
   }
 
   // Dedup within this batch

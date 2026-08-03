@@ -55,7 +55,7 @@ export default function BulkAssignModal({ onClose }) {
   const [activeMode,    setActiveMode]   = useState('auto');
 
   // Auto round-robin state
-  const [autoKeywords,     setAutoKeywords]     = useState('sales');
+  const [autoKeywords,     setAutoKeywords]     = useState('sales, cold calling, telemarketing, customer service, appointment setter');
   const [autoAgentNames,   setAutoAgentNames]   = useState([]);
   const [autoCountPerAgent, setAutoCountPerAgent] = useState(20);
   const [autoResult,       setAutoResult]       = useState(null);

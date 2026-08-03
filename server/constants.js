@@ -114,6 +114,23 @@ export const DAILY_RESUME_LEADS_PER_WCR = Number(process.env.DAILY_RESUME_LEADS_
 export const RESUME_SEARCH_KEYWORDS = process.env.RESUME_SEARCH_KEYWORDS || 'sales';
 
 /**
+ * Multi-keyword list for automatic Craigslist resume volume generation.
+ * Pulls across 10 targeted sales & recruiting categories in a single run.
+ */
+export const RESUME_SEARCH_KEYWORDS_LIST = [
+  'sales',
+  'commission sales',
+  'cold calling',
+  'telemarketing',
+  'customer service',
+  'inside sales',
+  'outside sales',
+  'account executive',
+  'business development',
+  'appointment setter',
+];
+
+/**
  * Staff roles that receive daily resume leads.
  * Any active staff account with one of these roles gets 20 leads/day.
  */
