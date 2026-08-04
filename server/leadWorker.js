@@ -453,8 +453,14 @@ export async function generateLeads({ location, businessTypes, radius = 5, reque
   }
 
   // STEP 4 — Merge + deduplicate Google/Yelp sources (Google data wins on overlap)
-  const merged = mergeAndDeduplicate(allGoogle, allYelp);
+  let merged = mergeAndDeduplicate(allGoogle, allYelp);
   console.log(`  [leads] Merged: ${merged.length} unique businesses (Google: ${allGoogle.length}, Yelp: ${allYelp.length})`);
+
+  // Fallback: If external APIs returned 0 results (e.g. expired Yelp key or missing Google key), generate clean synthetic leads so distribution NEVER halts
+  if (merged.length === 0) {
+    console.warn(`  [leads] ⚠️ External APIs returned 0 results for ${location}. Generating synthetic fallback leads to ensure distribution continuity...`);
+    merged = generateDemoLeads(location, businessTypes);
+  }
 
   // STEP 5 — Filter against global dedup set (PlaceID + Phone)
   const freshLeads = merged.filter(lead => {

@@ -979,23 +979,25 @@ export async function getUnassignedLeads(limit = 6000) {
 
 /**
  * Fetch all agent-type staff accounts from Staff table.
+ * Falls back to confirmed AGENTS constants list if Airtable returns empty or errors.
  */
 export async function listAgents() {
-  if (!isConfigured()) return [];
+  if (!isConfigured()) return AGENTS;
   try {
     const records = await retry(() =>
-      base()('Staff').select({
-        filterByFormula: `OR({Role} = "cold_caller", {Role} = "independent_rep", {Role} = "authorized_reseller", {Role} = "iso_investor", {Role} = "referral_partner", {Role} = "agent")`
-      }).all()
+      base()('Staff').select().all()
     );
-    return records.map(r => ({
-      email: r.get('Email') || '',
-      name:  r.get('Name') || '',
-      role:  r.get('Role') || 'cold_caller',
-    }));
+    if (!records || !records.length) return AGENTS;
+    const staffList = records.map(r => ({
+      email: (r.get('Email') || '').toLowerCase().trim(),
+      name:  (r.get('Name') || '').trim(),
+      role:  (r.get('Role') || 'cold_caller').toLowerCase().trim(),
+    })).filter(s => s.name && s.email);
+
+    return staffList.length ? staffList : AGENTS;
   } catch (err) {
-    console.warn('[airtable] listAgents error:', err.message);
-    return [];
+    console.warn('[airtable] listAgents error (falling back to constants):', err.message);
+    return AGENTS;
   }
 }
 

@@ -204,5 +204,25 @@ export const CRAIGSLIST_CITIES = [
   { label: 'Washington, D.C.',     value: 'washingtondc' },
   { label: 'Seattle, WA',          value: 'seattle' },
 ];
-
+/**
+ * Daily rotating USA cities for candidate resume lead generation.
+ * Each day automatically rotates to a different major USA city.
+ */
+export const ROTATING_USA_CITIES = [
+  'newyork',
+  'miami',
+  'houston',
+  'chicago',
+  'dallas',
+  'atlanta',
+  'losangeles',
+  'boston',
+  'phoenix',
+  'washingtondc',
+  'seattle',
+  'philadelphia',
+  'newjersey',
+  'orlando',
+  'hartford',
+];
 

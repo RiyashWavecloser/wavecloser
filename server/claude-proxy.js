@@ -68,6 +68,7 @@ import {
   markNotificationRead,
 } from './airtableClient.js';
 import { generateLeads } from './leadWorker.js';
+import { distributeDailyLeads, distributeResumeLeads } from './automationWorker.js';
 import {
   isConfigured as emailReady,
   sendEmail,
@@ -536,6 +537,29 @@ app.post('/api/leads/assign', async (req, res) => {
     res.json({ demo: false, assigned });
   } catch (err) {
     console.error('[proxy] POST /api/leads/assign:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/leads/auto-distribute-now', async (req, res) => {
+  try {
+    const session = req.body?.session || 'morning';
+    console.log(`[proxy] Triggering auto lead distribution now (session: ${session})...`);
+    await distributeDailyLeads(session);
+    res.json({ success: true, message: `Daily ${session} lead distribution triggered successfully` });
+  } catch (err) {
+    console.error('[proxy] POST /api/leads/auto-distribute-now error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/resume-leads/distribute-now', async (req, res) => {
+  try {
+    console.log('[proxy] Triggering daily resume lead distribution now...');
+    await distributeResumeLeads();
+    res.json({ success: true, message: 'Resume lead distribution triggered successfully' });
+  } catch (err) {
+    console.error('[proxy] POST /api/resume-leads/distribute-now error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1779,7 +1803,3 @@ app.listen(PORT, () => {
     });
   }
 });
-
-// ─── Helpers (used by emailService import check) ──────────────────────────────
-function isConfigured() { return !!ANTHROPIC_KEY; }
-export { isConfigured };
