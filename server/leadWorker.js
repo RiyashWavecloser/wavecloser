@@ -530,15 +530,16 @@ function generateDemoLeads(location, businessTypes) {
 
   const leads = [];
   let counter = 1;
+  const now = Date.now();
   for (const type of businessTypes) {
     const typeNames = names[type] || ['Business'];
     for (const name of typeNames.slice(0, 4)) {
       leads.push({
-        placeId: `demo-gen-${counter++}`,
+        placeId: `demo-gen-${now}-${counter++}`,
         businessName: name,
         type,
         address: `${100 + counter} Main St, ${location}`,
-        phone: `(555) 555-${String(1000 + counter).slice(-4)}`,
+        phone: `(555) ${String(200 + (now % 700)).slice(-3)}-${String(1000 + (counter * 37 + now) % 8999).slice(-4)}`,
         website: counter % 3 === 0 ? `${name.toLowerCase().replace(/\s/g, '')}.com` : '',
         rating: +(3.5 + Math.random() * 1.5).toFixed(1),
         reviewCount: Math.floor(20 + Math.random() * 500),

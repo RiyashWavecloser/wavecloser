@@ -100,19 +100,37 @@ export default function QualifierPortal({ currentUser: _currentUser, onLogout, e
   }
 
   // ── Optimistic status update helper ──────────────────────────────────────────
-  function handleStatusChange(leadPlaceId, newStatus, extraFields = {}) {
+  async function handleStatusChange(leadPlaceId, newStatus, extraFields = {}) {
     // 1. Grab current notes from noteValues state
     const currentNotes = noteValues[leadPlaceId] ?? '';
 
-    // 2. Optimistic update — lead moves to the correct tab instantly
+    // 2. Snapshot old state for rollback on error
+    const prevLeads = leads;
+
+    // 3. Optimistic update — lead moves to the correct tab instantly
     setLeads(prev => prev.map(l =>
       l.placeId === leadPlaceId
         ? { ...l, qualifierStatus: newStatus, qualifierNotes: currentNotes, ...extraFields }
         : l
     ));
 
-    // 3. Save to server in background
-    updateQualifierStatusAPI(leadPlaceId, newStatus, currentNotes).catch(() => {});
+    // 4. Save to server — show error and rollback on failure
+    try {
+      const result = await updateQualifierStatusAPI(leadPlaceId, newStatus, currentNotes);
+      if (result?.demo) {
+        // Server returned demo mode — Airtable not configured or save silently failed
+        setLeads(prevLeads);
+        showToast('⚠️ Could not save — server offline or session expired. Please refresh.', 'error');
+      }
+    } catch (err) {
+      setLeads(prevLeads);
+      if (err.message === 'SESSION_EXPIRED') {
+        showToast('⏱ Session expired — please log in again.', 'error');
+        setTimeout(() => window.location.reload(), 2000);
+      } else {
+        showToast(`❌ Save failed: ${err.message || 'Unknown error'}`, 'error');
+      }
+    }
   }
 
   // Mark contacted

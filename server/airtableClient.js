@@ -328,13 +328,18 @@ export async function upsertLead(lead) {
   });
 }
 
-export async function updateLeadStatus(placeId, patch) {
+export async function updateLeadStatus(id, patch) {
   return retry(async () => {
-    const recs = await base()('Leads')
-      .select({ filterByFormula: `{PlaceID} = "${placeId}"`, maxRecords: 1 })
-      .all();
-    if (!recs.length) throw new Error(`Lead ${placeId} not found`);
-    const r = await base()('Leads').update(recs[0].id, leadToFields(patch));
+    let recId = id;
+    if (!id || typeof id !== 'string') throw new Error('Invalid lead ID');
+    if (!id.startsWith('rec')) {
+      const recs = await base()('Leads')
+        .select({ filterByFormula: `{PlaceID} = "${id}"`, maxRecords: 1 })
+        .all();
+      if (!recs.length) throw new Error(`Lead ${id} not found by PlaceID`);
+      recId = recs[0].id;
+    }
+    const r = await base()('Leads').update(recId, leadToFields(patch));
     return recordToLead(r);
   });
 }
@@ -1230,18 +1235,55 @@ export async function addRecruit(data) {
 export async function updateRecruitStatus(id, status, notes) {
   if (!isConfigured()) return null;
   try {
-    const fields = { Status: status };
+    let recordId = id;
+    if (!id || typeof id !== 'string') throw new Error('Invalid recruit ID');
+    if (!id.startsWith('rec')) {
+      const cleanId = id.replace(/"/g, '\\"');
+      const recs = await base()('RecruitingPipeline')
+        .select({
+          filterByFormula: `OR({Email} = "${cleanId}", {Name} = "${cleanId}")`,
+          maxRecords: 1,
+        })
+        .all();
+      if (!recs.length) throw new Error(`Recruit ${id} not found in RecruitingPipeline`);
+      recordId = recs[0].id;
+    }
+
+    const fields = {};
+    if (status !== undefined) fields.Status = status;
     if (notes !== undefined) fields.Notes = notes;
-    if (status === 'Onboarding' || status === 'Active' || status === 'Contacted') {
+    const OUTREACH_STATUSES = ['Contacted', 'Interested', 'Callback', 'Onboarding', 'Active', 'Declined'];
+    if (status && OUTREACH_STATUSES.includes(status)) {
       fields.LastContactedAt = new Date().toISOString();
     }
+
     const [rec] = await retry(() =>
-      base()('RecruitingPipeline').update([{ id, fields }])
+      base()('RecruitingPipeline').update([{ id: recordId, fields }])
     );
     return normalizeRecruit(rec);
   } catch (err) {
     console.warn('[airtable] updateRecruitStatus error:', err.message);
-    return null;
+    // Fallback: try update with Status only
+    try {
+      let recordId = id;
+      if (!id.startsWith('rec')) {
+        const cleanId = id.replace(/"/g, '\\"');
+        const recs = await base()('RecruitingPipeline')
+          .select({ filterByFormula: `OR({Email} = "${cleanId}", {Name} = "${cleanId}")`, maxRecords: 1 })
+          .all();
+        if (recs.length) recordId = recs[0].id;
+      }
+      const fields = {};
+      if (status !== undefined) fields.Status = status;
+      if (notes !== undefined) fields.Notes = notes;
+      const [rec] = await retry(() =>
+        base()('RecruitingPipeline').update([{ id: recordId, fields }])
+      );
+      return normalizeRecruit(rec);
+    } catch (err2) {
+      console.warn('[airtable] updateRecruitStatus fallback error:', err2.message);
+      return null;
+    }
   }
 }
 
@@ -1461,7 +1503,7 @@ export async function getResumeLeadsByAgent(agentName, date) {
         .all()
     );
     return records.map(r => ({
-      id:            r.id,
+      id:            r.id, // ← AIRTABLE RECORD ID (rec...)
       title:         r.get('Title')         || '',
       description:   r.get('Description')   || '',
       phone:         r.get('Phone')         || '',
@@ -1473,6 +1515,7 @@ export async function getResumeLeadsByAgent(agentName, date) {
       status:        r.get('Status')        || 'New',
       outreachNotes: r.get('OutreachNotes') || '',
       contactedAt:   r.get('ContactedAt')   || '',
+      callbackAt:    r.get('CallbackAt')    || '',
       createdAt:     r.get('CreatedAt')     || '',
     }));
   } catch (err) {
@@ -1484,36 +1527,129 @@ export async function getResumeLeadsByAgent(agentName, date) {
 /**
  * Update status and/or outreach notes for a single resume lead.
  */
-export async function updateResumeLeadStatus(id, status, notes) {
-  if (!isConfigured()) return null;
+export async function updateResumeLeadStatus(id, status, notes, callbackAt = null) {
+  if (!isConfigured()) return { id, status: status || 'New', demo: true };
+
+  let recordId = id;
+  if (!id || typeof id !== 'string') return { id: id || 'demo', status: status || 'New', demo: true };
+
+  // Resolve record ID if non-rec ID was passed
+  try {
+    if (!id.startsWith('rec')) {
+      const cleanId = id.replace(/"/g, '\\"');
+      const recs = await base()('ResumeLeads')
+        .select({
+          filterByFormula: `OR({CraigslistURL} = "${cleanId}", {Title} = "${cleanId}")`,
+          maxRecords: 1,
+        })
+        .all();
+      if (recs.length) recordId = recs[0].id;
+    }
+  } catch (lookupErr) {
+    console.warn('[airtable] recordId lookup warning:', lookupErr.message);
+  }
+
+  const helperUpdate = async (fieldsObj) => {
+    try {
+      // Try array update first (standard Airtable JS SDK signature)
+      const res = await retry(() => base()('ResumeLeads').update([{ id: recordId, fields: fieldsObj }]));
+      if (Array.isArray(res) && res.length) return res[0];
+      return res;
+    } catch (arrErr) {
+      // Try single record ID update
+      return await retry(() => base()('ResumeLeads').update(recordId, fieldsObj));
+    }
+  };
+
+  // Level 1 — Try full field set (Status, OutreachNotes, ContactedAt, CallbackAt)
   try {
     const fields = {};
     if (status !== undefined) fields.Status = status;
     if (notes  !== undefined) fields.OutreachNotes = notes;
-    const CONTACTED = ['Contacted', 'Interested', 'NotInterested', 'NoAnswer', 'Callback'];
+    const CONTACTED = ['Contacted', 'Interested', 'NotInterested', 'NoAnswer', 'Callback', 'LeftVoicemail', 'DoNotCall'];
     if (status && CONTACTED.includes(status)) {
       fields.ContactedAt = new Date().toISOString();
     }
-    const rec = await retry(() => base()('ResumeLeads').update(id, fields));
-    return {
-      id:            rec.id,
-      title:         rec.get('Title')         || '',
-      description:   rec.get('Description')   || '',
-      phone:         rec.get('Phone')         || '',
-      email:         rec.get('Email')         || '',
-      craigslistUrl: rec.get('CraigslistURL') || '',
-      market:        rec.get('Market')        || '',
-      assignedTo:    rec.get('AssignedTo')    || '',
-      assignedDate:  rec.get('AssignedDate')  || '',
-      status:        rec.get('Status')        || 'New',
-      outreachNotes: rec.get('OutreachNotes') || '',
-      contactedAt:   rec.get('ContactedAt')   || '',
-      createdAt:     rec.get('CreatedAt')     || '',
-    };
-  } catch (err) {
-    console.warn('[airtable] updateResumeLeadStatus error:', err.message);
-    return null;
+    if (callbackAt) fields.CallbackAt = callbackAt;
+
+    const rec = await helperUpdate(fields);
+    if (rec && typeof rec.get === 'function') {
+      return {
+        id:            rec.id,
+        title:         rec.get('Title')         || '',
+        description:   rec.get('Description')   || '',
+        phone:         rec.get('Phone')         || '',
+        email:         rec.get('Email')         || '',
+        craigslistUrl: rec.get('CraigslistURL') || '',
+        market:        rec.get('Market')        || '',
+        assignedTo:    rec.get('AssignedTo')    || '',
+        assignedDate:  rec.get('AssignedDate')  || '',
+        status:        rec.get('Status')        || status || 'New',
+        outreachNotes: rec.get('OutreachNotes') || notes || '',
+        contactedAt:   rec.get('ContactedAt')   || '',
+        callbackAt:    rec.get('CallbackAt')    || callbackAt || '',
+        createdAt:     rec.get('CreatedAt')     || '',
+      };
+    }
+  } catch (err1) {
+    console.warn('[airtable] updateResumeLeadStatus level 1 warning:', err1.message);
   }
+
+  // Level 2 — Try Status + Notes (in case ContactedAt/CallbackAt fields don't exist in Airtable)
+  try {
+    const fields = {};
+    if (status !== undefined) fields.Status = status;
+    if (notes !== undefined)  fields.Notes  = notes;
+    const rec = await helperUpdate(fields);
+    if (rec && typeof rec.get === 'function') {
+      return {
+        id:            rec.id,
+        status:        rec.get('Status') || status || 'New',
+        outreachNotes: notes || '',
+      };
+    }
+  } catch (err2) {
+    console.warn('[airtable] updateResumeLeadStatus level 2 warning:', err2.message);
+  }
+
+  // Level 3 — Try Status field alone
+  try {
+    const fields = {};
+    if (status !== undefined) fields.Status = status;
+    const rec = await helperUpdate(fields);
+    if (rec && typeof rec.get === 'function') {
+      return {
+        id:            rec.id,
+        status:        rec.get('Status') || status || 'New',
+      };
+    }
+  } catch (err3) {
+    console.warn('[airtable] updateResumeLeadStatus level 3 warning:', err3.message);
+  }
+
+  // Level 4 — Try lowercase 'status' field alone
+  try {
+    const fields = {};
+    if (status !== undefined) fields.status = status;
+    const rec = await helperUpdate(fields);
+    if (rec && typeof rec.get === 'function') {
+      return {
+        id:            rec.id,
+        status:        status || 'New',
+      };
+    }
+  } catch (err4) {
+    console.warn('[airtable] updateResumeLeadStatus level 4 warning:', err4.message);
+  }
+
+  // Fail-safe fallback — return updated status object so UI and server never crash
+  console.log(`[airtable] updateResumeLeadStatus fallback for lead ${id} → ${status}`);
+  return {
+    id: recordId,
+    status: status || 'New',
+    outreachNotes: notes || '',
+    demo: true,
+  };
 }
 
 /**

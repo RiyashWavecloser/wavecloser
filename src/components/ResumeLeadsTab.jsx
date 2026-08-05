@@ -11,7 +11,7 @@
  * All leads are globally deduplicated on the server — agents only ever see fresh candidates.
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { fetchMyResumeLeads, updateResumeLeadAPI, agentSelfSearchAndClaim } from '../lib/dataLayer.js';
 
 const STATUS_COLORS = {
@@ -20,20 +20,33 @@ const STATUS_COLORS = {
   Interested:    { bg: '#E8F7EF', color: '#1E7A46', label: '✅ Interested' },
   NotInterested: { bg: '#FEF0F0', color: '#B91C1C', label: '❌ Not Interested' },
   NoAnswer:      { bg: '#F5F0FF', color: '#5B21B6', label: '🔇 No Answer' },
+  LeftVoicemail: { bg: '#EEE9FF', color: '#4A3A99', label: '📨 Voicemail' },
   Callback:      { bg: '#FFF4E0', color: '#B45309', label: '📞 Callback' },
 };
 
+const STATUS_TABS = [
+  { id: 'all',            label: 'All',            statuses: null },
+  { id: 'new',            label: 'New',            statuses: ['New'] },
+  { id: 'interested',     label: 'Interested',     statuses: ['Interested'] },
+  { id: 'callback',       label: 'Callback',       statuses: ['Callback'] },
+  { id: 'not_interested', label: 'Not Interested', statuses: ['NotInterested'] },
+  { id: 'no_answer',      label: 'No Answer',      statuses: ['NoAnswer'] },
+  { id: 'voicemail',      label: 'Voicemail',      statuses: ['LeftVoicemail'] },
+];
+
 export default function ResumeLeadsTab({ currentUser }) {
   // ─── Assigned leads state ───────────────────────────────────────────────────
-  const [leads, setLeads]         = useState([]);
-  const [loading, setLoading]     = useState(true);
-  const [toast, setToast]         = useState(null);
-  const [filter, setFilter]       = useState('All');
-  const [expanded, setExpanded]   = useState({});
-  const [notes, setNotes]         = useState({});
-  const [saving, setSaving]       = useState({});
-  const prevCountRef              = useRef(0);
-  const pollRef                   = useRef(null);
+  const [leads, setLeads]                 = useState([]);
+  const [loading, setLoading]             = useState(true);
+  const [toast, setToast]                 = useState(null);
+  const [activeResumeTab, setActiveResumeTab] = useState('new');
+  const [expanded, setExpanded]           = useState({});
+  const [notes, setNotes]                 = useState({});
+  const [saving, setSaving]               = useState({});
+  const [callbackPickerLeadId, setCallbackPickerLeadId] = useState(null);
+  const [callbackPickerValue, setCallbackPickerValue]   = useState('');
+  const prevCountRef                      = useRef(0);
+  const pollRef                           = useRef(null);
 
   // ─── Tab state ──────────────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState('assigned'); // 'assigned' | 'find'
@@ -60,7 +73,18 @@ export default function ResumeLeadsTab({ currentUser }) {
       showToast(`📋 ${fetched.length - prevCountRef.current} new resume leads assigned to you!`, 'success');
     }
     prevCountRef.current = fetched.length;
-    setLeads(fetched);
+
+    setLeads(prev => {
+      if (!silent || !prev.length) return fetched;
+      // Preserve local status edits during silent polling
+      const localStatusMap = {};
+      prev.forEach(l => { if (l.status) localStatusMap[l.id] = l.status; });
+      return fetched.map(l => ({
+        ...l,
+        status: localStatusMap[l.id] || l.status
+      }));
+    });
+
     setNotes(prev => {
       const merged = { ...prev };
       fetched.forEach(l => {
@@ -73,15 +97,47 @@ export default function ResumeLeadsTab({ currentUser }) {
 
   useEffect(() => {
     load();
-    pollRef.current = setInterval(() => load(true), 15000);
+    pollRef.current = setInterval(() => load(true), 30000);
     return () => clearInterval(pollRef.current);
   }, [load]);
 
   // ─── Update lead status ──────────────────────────────────────────────────────
-  const handleStatus = async (lead, status) => {
-    const optimistic = leads.map(l => l.id === lead.id ? { ...l, status } : l);
-    setLeads(optimistic);
-    await updateResumeLeadAPI(lead.id, status, notes[lead.id]);
+  const handleStatus = async (lead, newStatus, callbackTime = null) => {
+    const oldStatus = lead.status;
+    const oldCallbackAt = lead.callbackAt;
+
+    // STEP 1 — Update local state IMMEDIATELY (optimistic update)
+    // Lead moves to correct tab right away
+    setLeads(prev => prev.map(l =>
+      l.id === lead.id
+        ? {
+            ...l,
+            status:      newStatus,
+            callbackAt:  callbackTime || l.callbackAt,
+            contactedAt: new Date().toISOString(),
+          }
+        : l
+    ));
+
+    showToast(`Marked candidate as ${newStatus}`, 'success');
+
+    // STEP 2 — Save to Airtable via API in the background
+    try {
+      const result = await updateResumeLeadAPI(lead.id, newStatus, notes[lead.id], callbackTime);
+      if (!result || (result.error && !result.updated)) {
+        console.error('[Resume] Failed to save status:', result?.error);
+        setLeads(prev => prev.map(l =>
+          l.id === lead.id ? { ...l, status: oldStatus, callbackAt: oldCallbackAt } : l
+        ));
+        showToast('Failed to save — please try again', 'error');
+      }
+    } catch (err) {
+      console.error('[Resume] API error:', err.message);
+      setLeads(prev => prev.map(l =>
+        l.id === lead.id ? { ...l, status: oldStatus, callbackAt: oldCallbackAt } : l
+      ));
+      showToast('Connection error — status may not have saved', 'error');
+    }
   };
 
   const handleNotesBlur = async (lead) => {
@@ -123,16 +179,31 @@ export default function ResumeLeadsTab({ currentUser }) {
     }
   };
 
-  // ─── Stats ───────────────────────────────────────────────────────────────────
+  // ─── Derived state for tab filtering ─────────────────────────────────────────
   const today = new Date().toISOString().slice(0, 10);
-  const todayLeads = leads.filter(l => l.assignedDate === today);
-  const contacted  = todayLeads.filter(l => l.status !== 'New').length;
-  const interested = todayLeads.filter(l => l.status === 'Interested').length;
-  const progress   = todayLeads.length > 0 ? Math.round((contacted / todayLeads.length) * 100) : 0;
+  const todayLeads = leads.filter(l => !l.assignedDate || l.assignedDate === today || l.assignedDate.startsWith(today));
+  const contacted  = leads.filter(l => l.status && l.status !== 'New').length;
+  const interested = leads.filter(l => l.status === 'Interested').length;
+  const todayContacted = todayLeads.filter(l => l.status && l.status !== 'New').length;
+  const progress   = todayLeads.length > 0 ? Math.round((todayContacted / todayLeads.length) * 100) : 0;
 
-  const filtered = filter === 'All' ? leads
-    : filter === 'Today' ? todayLeads
-    : leads.filter(l => l.status === filter);
+  // Computed from local state — updates instantly when status changes
+  const visibleResumeLeads = useMemo(() => {
+    const tab = STATUS_TABS.find(t => t.id === activeResumeTab);
+    if (!tab || !tab.statuses) return leads;
+    return leads.filter(lead => tab.statuses.includes(lead.status));
+  }, [leads, activeResumeTab]);
+
+  // Tab counts — computed from local state
+  const tabCounts = useMemo(() => {
+    const counts = {};
+    STATUS_TABS.forEach(tab => {
+      counts[tab.id] = tab.statuses
+        ? leads.filter(l => tab.statuses.includes(l.status)).length
+        : leads.length;
+    });
+    return counts;
+  }, [leads]);
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
@@ -181,20 +252,43 @@ export default function ResumeLeadsTab({ currentUser }) {
             )}
           </div>
 
-          {/* Filter bar */}
+          {/* Filter bar with status tabs and badges */}
           <div style={S.filterBar}>
-            {['All', 'Today', 'New', 'Interested', 'Callback', 'NoAnswer', 'NotInterested'].map(f => (
-              <button key={f} onClick={() => setFilter(f)}
-                style={{ ...S.filterBtn, ...(filter === f ? S.filterBtnActive : {}) }}>
-                {f}
-              </button>
-            ))}
+            {STATUS_TABS.map(tab => {
+              const count = tabCounts[tab.id] || 0;
+              const isActive = activeResumeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveResumeTab(tab.id)}
+                  style={{
+                    ...S.filterBtn,
+                    ...(isActive ? S.filterBtnActive : {}),
+                  }}
+                >
+                  {tab.label}
+                  {count > 0 && (
+                    <span style={{
+                      marginLeft: 6,
+                      padding: '1px 6px',
+                      borderRadius: 10,
+                      fontSize: 10,
+                      fontWeight: 800,
+                      background: isActive ? 'rgba(255,255,255,0.25)' : '#EAECEF',
+                      color: isActive ? '#fff' : '#444'
+                    }}>
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
 
           {/* Lead list */}
           {loading ? (
             <div style={S.emptyState}>Loading your leads...</div>
-          ) : filtered.length === 0 ? (
+          ) : visibleResumeLeads.length === 0 ? (
             <div style={S.emptyState}>
               {leads.length === 0 ? (
                 <div>
@@ -205,20 +299,24 @@ export default function ResumeLeadsTab({ currentUser }) {
                     🔍 Find My Own Leads
                   </button>
                 </div>
-              ) : 'No leads match this filter.'}
+              ) : `No ${STATUS_TABS.find(t => t.id === activeResumeTab)?.label || ''} leads found`}
             </div>
           ) : (
             <div style={S.list}>
-              {filtered.map((lead, idx) => {
+              {visibleResumeLeads.map((lead, idx) => {
                 const sc   = STATUS_COLORS[lead.status] || STATUS_COLORS.New;
                 const isEx = expanded[lead.id];
+                const showCallbackPicker = callbackPickerLeadId === lead.id;
                 return (
                   <div key={lead.id} style={{ ...S.card, borderLeft: `4px solid ${sc.color}` }}>
                     <div style={S.cardHeader} onClick={() => setExpanded(prev => ({ ...prev, [lead.id]: !prev[lead.id] }))}>
                       <span style={S.idx}>{idx + 1}</span>
                       <div style={S.cardTitle}>
                         <div style={S.candidateName}>{lead.title}</div>
-                        <div style={S.candidateMeta}>{lead.market}{lead.assignedDate === today ? ' · Today' : ` · ${lead.assignedDate}`}</div>
+                        <div style={S.candidateMeta}>
+                          {lead.market}{lead.assignedDate === today ? ' · Today' : ` · ${lead.assignedDate}`}
+                          {lead.callbackAt && ` · ⏰ CB: ${new Date(lead.callbackAt).toLocaleString()}`}
+                        </div>
                       </div>
                       <span style={{ ...S.statusBadge, background: sc.bg, color: sc.color }}>{sc.label}</span>
                       <span style={S.chevron}>{isEx ? '▲' : '▼'}</span>
@@ -240,10 +338,19 @@ export default function ResumeLeadsTab({ currentUser }) {
                             { status: 'NotInterested', label: '❌ Not Int.',     color: '#B91C1C', bg: '#FEF0F0' },
                             { status: 'Callback',      label: '📞 Callback',     color: '#B45309', bg: '#FFF4E0' },
                             { status: 'NoAnswer',      label: '🔇 No Answer',    color: '#5B21B6', bg: '#F5F0FF' },
+                            { status: 'LeftVoicemail', label: '📨 VM',          color: '#4A3A99', bg: '#EEE9FF' },
                           ].map(a => (
                             <button
                               key={a.status}
-                              onClick={() => handleStatus(lead, a.status)}
+                              onClick={() => {
+                                if (a.status === 'Callback') {
+                                  setCallbackPickerLeadId(showCallbackPicker ? null : lead.id);
+                                  setCallbackPickerValue('');
+                                } else {
+                                  setCallbackPickerLeadId(null);
+                                  handleStatus(lead, a.status);
+                                }
+                              }}
                               style={{
                                 ...S.actionBtn,
                                 background: lead.status === a.status ? a.color : a.bg,
@@ -255,6 +362,30 @@ export default function ResumeLeadsTab({ currentUser }) {
                             </button>
                           ))}
                         </div>
+
+                        {/* Inline Callback DateTime Picker */}
+                        {showCallbackPicker && (
+                          <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <input
+                              type="datetime-local"
+                              value={callbackPickerValue}
+                              onChange={e => setCallbackPickerValue(e.target.value)}
+                              style={{ flex: 1, padding: '8px 10px', borderRadius: 6, border: '1px solid #B45309', fontSize: 13, fontFamily: 'inherit', minWidth: 180 }}
+                            />
+                            <button
+                              onClick={() => {
+                                handleStatus(lead, 'Callback', callbackPickerValue || new Date().toISOString());
+                                setCallbackPickerLeadId(null);
+                              }}
+                              style={{ padding: '8px 16px', background: '#B45309', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+                            >✓ Save Callback</button>
+                            <button
+                              onClick={() => { setCallbackPickerLeadId(null); setCallbackPickerValue(''); }}
+                              style={{ padding: '8px 12px', background: '#EEE', color: '#555', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit' }}
+                            >Cancel</button>
+                          </div>
+                        )}
+
                         <textarea
                           placeholder="Outreach notes..."
                           value={notes[lead.id] ?? lead.outreachNotes ?? ''}

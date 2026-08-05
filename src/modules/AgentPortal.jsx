@@ -178,13 +178,16 @@ export default function AgentPortal({ currentUser, onLogout }) {
 
   // ─── Stats ──────────────────────────────────────────────────────────────────
   const stats = useMemo(() => {
-    const s = { total: leads.length, called: 0, interested: 0, notInterested: 0, callback: 0, noAnswer: 0, uncalled: 0 };
+    const s = { total: leads.length, called: 0, interested: 0, notInterested: 0, callback: 0, noAnswer: 0, voicemail: 0, dnc: 0, uncalled: 0 };
+    const CALLED_OUTCOMES = ['Interested', 'NotInterested', 'Callback', 'NoAnswer', 'LeftVoicemail', 'DoNotCall'];
     for (const l of leads) {
       if      (l.outcome === 'Interested')    s.interested++;
       else if (l.outcome === 'NotInterested') s.notInterested++;
       else if (l.outcome === 'Callback')      s.callback++;
       else if (l.outcome === 'NoAnswer')      s.noAnswer++;
-      if (['Interested','NotInterested','Callback','NoAnswer'].includes(l.outcome)) s.called++;
+      else if (l.outcome === 'LeftVoicemail') s.voicemail++;
+      else if (l.outcome === 'DoNotCall')     s.dnc++;
+      if (CALLED_OUTCOMES.includes(l.outcome)) s.called++;
       else s.uncalled++;
     }
     return s;
@@ -198,7 +201,8 @@ export default function AgentPortal({ currentUser, onLogout }) {
     });
   }, [leads]);
 
-  const weeklyCalledCount  = useMemo(() => weeklyLeads.filter(l => ['Interested','NotInterested','Callback','NoAnswer'].includes(l.outcome)).length, [weeklyLeads]);
+  const CALLED_OUTCOMES = useMemo(() => ['Interested', 'NotInterested', 'Callback', 'NoAnswer', 'LeftVoicemail', 'DoNotCall'], []);
+  const weeklyCalledCount   = useMemo(() => weeklyLeads.filter(l => CALLED_OUTCOMES.includes(l.outcome)).length, [weeklyLeads, CALLED_OUTCOMES]);
   const weeklyUncalledCount = useMemo(() => weeklyLeads.filter(l => !l.outcome).length, [weeklyLeads]);
   const todayStr            = new Date().toISOString().slice(0, 10);
   const calledToday         = useMemo(() => leads.filter(l => l.calledAt && l.calledAt.startsWith(todayStr)).length, [leads, todayStr]);
@@ -233,29 +237,58 @@ export default function AgentPortal({ currentUser, onLogout }) {
   // ─── Lead actions ───────────────────────────────────────────────────────────
   async function handleOutcome(lead, outcome, callbackAt = null) {
     const now = new Date().toISOString();
-    const patch = {
+    const targetId = lead.id || lead.placeId;
+    const patchData = {
       outcome,
       calledAt: now,
       status: outcome === 'Interested' ? 'Interested' : outcome,
     };
-    if (callbackAt) patch.callbackAt = callbackAt;
+    if (callbackAt) patchData.callbackAt = callbackAt;
 
+    // Snapshot for rollback
+    const prevLeads = leads;
+
+    // Optimistic update
     setLeads(prev => prev.map(l =>
-      l.placeId === lead.placeId ? { ...l, ...patch } : l
+      (l.id === targetId || l.placeId === targetId || l.placeId === lead.placeId) ? { ...l, ...patchData } : l
     ));
-    await updateLeadAPI(lead.placeId, {
-      ...patch,
-      agentNotes: lead.agentNotes || '',
-    });
 
-    if (outcome === 'Interested') showToast(`${lead.businessName} → Interested! Qualifier notified.`, 'success');
-    else if (outcome === 'Callback') showToast(`${lead.businessName} → Callback scheduled`, 'info');
-    else showToast(`${lead.businessName} → ${outcome}`, 'info');
+    try {
+      const result = await updateLeadAPI(targetId, {
+        ...patchData,
+        agentNotes: lead.agentNotes || '',
+      });
+
+      if (result?.demo) {
+        // Server returned demo — save failed silently
+        setLeads(prevLeads);
+        showToast('⚠️ Could not save — server offline or session expired. Please refresh.', 'error');
+        return;
+      }
+
+      // Success feedback
+      if (outcome === 'Interested') showToast(`${lead.businessName} → Interested! Qualifier notified.`, 'success');
+      else if (outcome === 'Callback') showToast(`${lead.businessName} → Callback scheduled`, 'info');
+      else showToast(`${lead.businessName} → ${outcome}`, 'info');
+
+    } catch (err) {
+      setLeads(prevLeads);
+      if (err.message === 'SESSION_EXPIRED') {
+        showToast('⏱ Session expired — logging you out. Please log in again.', 'error');
+        setTimeout(() => window.location.reload(), 2000);
+      } else {
+        showToast(`❌ Could not save outcome: ${err.message || 'Unknown error'}`, 'error');
+      }
+      setCallbackPickerLeadId(null);
+      setCallbackPickerValue('');
+      return;
+    }
 
     setCallbackPickerLeadId(null);
     setCallbackPickerValue('');
     setLeads(prev => { saveLeadsToStorage(prev); return prev; });
   }
+
 
   async function handleNotesBlur(lead, notes) {
     setLeads(prev => prev.map(l => l.placeId === lead.placeId ? { ...l, agentNotes: notes } : l));

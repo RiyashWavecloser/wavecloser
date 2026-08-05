@@ -86,7 +86,7 @@ async function post(path, body) {
   });
   if (res.status === 401) {
     setSession(null);
-    window.location.reload();
+    throw new Error('SESSION_EXPIRED');
   }
   if (!res.ok) {
     // Try to surface the server error message
@@ -107,10 +107,15 @@ async function patch(path, body) {
     body: JSON.stringify(body),
   });
   if (res.status === 401) {
+    // Session expired — notify user BEFORE reload so the toast can appear briefly
     setSession(null);
-    window.location.reload();
+    throw new Error('SESSION_EXPIRED');
   }
-  if (!res.ok) throw new Error(`PATCH ${path} → ${res.status}`);
+  if (!res.ok) {
+    let msg = `PATCH ${path} → ${res.status}`;
+    try { const j = await res.json(); if (j?.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
   return res.json();
 }
 
@@ -596,11 +601,12 @@ export async function fetchMyResumeLeads() {
 /**
  * Update status and/or outreach notes for a resume lead.
  */
-export async function updateResumeLeadAPI(id, status, notes) {
+export async function updateResumeLeadAPI(id, status, notes, callbackAt = null) {
   try {
-    return await patch(`/api/resume-leads/${encodeURIComponent(id)}/status`, { status, notes });
-  } catch {
-    return { demo: true };
+    return await patch(`/api/resume-leads/${encodeURIComponent(id)}/status`, { status, notes, callbackAt });
+  } catch (err) {
+    console.error('[dataLayer] updateResumeLeadAPI error:', err.message);
+    return { error: err.message, demo: true };
   }
 }
 

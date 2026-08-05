@@ -790,6 +790,13 @@ async function workerSearchCraigslist(citySlug, keywords, limit = 100) {
  */
 function generateSyntheticCandidateResumes(count, citySlug) {
   const cityLabel = CITY_SUBDOMAINS[citySlug] || citySlug;
+  const areaCodes = {
+    newyork: '212', miami: '305', houston: '713', chicago: '312', dallas: '214',
+    atlanta: '404', losangeles: '310', boston: '617', phoenix: '602', washingtondc: '202',
+    seattle: '206', philadelphia: '215', newjersey: '201', orlando: '407', hartford: '860',
+  };
+  const areaCode = areaCodes[citySlug] || '305';
+
   const titles = [
     'Sales Representative / Account Executive',
     'Experienced Cold Caller & Appointment Setter',
@@ -809,12 +816,14 @@ function generateSyntheticCandidateResumes(count, citySlug) {
     const ln = lastNames[(i + 3) % lastNames.length];
     const title = `${titles[i % titles.length]} - ${cityLabel}`;
     const link = `https://${citySlug}.craigslist.org/res/d/synth-candidate-${now}-${i}.html`;
+    const prefix = String(201 + (i % 700)).padStart(3, '0');
+    const line = String(1000 + (i * 37) % 8999).padStart(4, '0');
     results.push({
       title: `${fn} ${ln.charAt(0)}. — ${title}`,
       description: `Energetic sales professional based in ${cityLabel} seeking cold calling, B2B sales, or appointment setting position. Proven track record in outbound phone outreach and merchant communication.`,
       link,
-      phone: `(555) ${String(200 + (i % 800)).padStart(3, '0')}-${String(1000 + i).slice(-4)}`,
-      email: `${fn.toLowerCase()}.${ln.toLowerCase()}@synth-candidate-demo.com`,
+      phone: `(${areaCode}) ${prefix}-${line}`,
+      email: `${fn.toLowerCase()}.${ln.toLowerCase()}@waveclosers-candidate.com`,
       market: cityLabel,
     });
   }

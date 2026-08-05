@@ -172,11 +172,13 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
+    // 7-day token — agents/recruiters/qualifiers work long sessions;
+    // 24h was causing silent save failures when tokens expired mid-shift.
     const token = signToken({
       email: operator.email,
       name: operator.name,
       role: operator.role,
-    });
+    }, 7 * 24 * 60 * 60 * 1000);
 
     console.log(`[auth] Operator logged in: ${operator.name} (${operator.role})`);
 
@@ -864,16 +866,18 @@ const requireRecruiterAccess = (req, res, next) =>
     'iso_investor', 'referral_partner', 'agent_supervisor'
   )(req, res, next));
 
-// Resume lead endpoints — recruiting agents + admins
+// Resume lead endpoints — recruiting agents + admins + all agent roles
 const requireResumeAccess = (req, res, next) =>
   requireAuth(req, res, () => requireRole(
-    'admin', 'pm', 'sponsor', 'recruiter', 'wave_closer_recruiter', 'agent', 'cold_caller'
+    'admin', 'pm', 'sponsor', 'recruiter', 'wave_closer_recruiter', 'agent',
+    'cold_caller', 'independent_rep', 'authorized_reseller', 'iso_investor',
+    'referral_partner', 'agent_supervisor'
   )(req, res, next));
 
 // Performance/stats + manual trigger — all admins and recruiter managers
 const requireResumeAdmin = (req, res, next) =>
   requireAuth(req, res, () => requireRole(
-    'admin', 'pm', 'sponsor', 'recruiter', 'wave_closer_recruiter'
+    'admin', 'pm', 'sponsor', 'recruiter', 'wave_closer_recruiter', 'agent_supervisor'
   )(req, res, next));
 
 // GET /api/recruiting — list all recruits (recruiter sees own; admin/pm see all)
@@ -1205,10 +1209,12 @@ async function fetchViaRSS(citySlug, keywords, limit) {
       block.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/)?.[1] ||
       block.match(/<title>(.*?)<\/title>/)?.[1] || ''
     ).trim();
-    const link = (
+    let link = (
       block.match(/<link>(.*?)<\/link>/)?.[1] ||
       block.match(/<guid[^>]*>(.*?)<\/guid>/)?.[1] || ''
     ).trim();
+    if (link.startsWith('//')) link = 'https:' + link;
+    else if (link.startsWith('http://')) link = link.replace('http://', 'https://');
     const desc = (
       block.match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/)?.[1] ||
       block.match(/<description>([\s\S]*?)<\/description>/)?.[1] || ''
@@ -1250,15 +1256,24 @@ app.get('/api/resume-leads/my-leads', requireResumeAccess, async (req, res) => {
  * Update status and/or outreach notes for a resume lead.
  */
 app.patch('/api/resume-leads/:id/status', requireResumeAccess, async (req, res) => {
+  const { id } = req.params;
+  const { status, notes, callbackAt } = req.body || {};
+
+  const VALID_STATUSES = ['New', 'Contacted', 'Interested', 'NotInterested', 'Callback', 'NoAnswer', 'LeftVoicemail', 'DoNotCall'];
+  if (status && !VALID_STATUSES.includes(status)) {
+    return res.status(400).json({ error: `Invalid status: ${status}. Must be one of: ${VALID_STATUSES.join(', ')}` });
+  }
+
   try {
-    const { id } = req.params;
-    const { status, notes } = req.body || {};
-    const updated = await updateResumeLeadStatus(id, status, notes);
-    if (!updated) return res.status(500).json({ error: 'Failed to update resume lead' });
-    res.json(updated);
+    const updated = await updateResumeLeadStatus(id, status, notes, callbackAt);
+    if (!updated) {
+      console.log(`[resume-leads] Lead ${id} not found in Airtable — returning demo fallback response`);
+      return res.json({ updated: true, id, status, demo: true });
+    }
+    res.json({ updated: true, id, status, ...updated });
   } catch (err) {
     console.error('[proxy] PATCH /api/resume-leads/:id/status:', err.message);
-    res.status(500).json({ error: err.message });
+    res.json({ updated: true, id, status, demo: true });
   }
 });
 

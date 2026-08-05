@@ -202,21 +202,48 @@ export default function RecruitingPipelineView({ currentUser }) {
   async function moveToStatus(recruit, newStatus) {
     setStatusUpdating(true);
     const notes = recruit.notes || '';
-    const res = await updateRecruitStatusAPI(recruit.id, newStatus, notes);
+
+    // Optimistic update
     const updated = { ...recruit, status: newStatus };
     setRecruits(prev => prev.map(r => r.id === recruit.id ? updated : r));
     setSelected(updated);
-    if (newStatus === 'Onboarding') {
-      showToast(`${recruit.name} moved to Onboarding! Mildred's queue notified.`);
-    } else if (newStatus === 'Active') {
-      showToast(`${recruit.name} is now Active! User record created in Users (Orca).`);
-    } else if (newStatus === 'Declined') {
-      showToast(`${recruit.name} marked as Declined.`, 'info');
-    } else {
-      showToast(`${recruit.name} moved to ${newStatus}.`);
+
+    try {
+      const res = await updateRecruitStatusAPI(recruit.id, newStatus, notes);
+
+      if (!res || res.demo) {
+        // Rollback — server could not save
+        setRecruits(prev => prev.map(r => r.id === recruit.id ? recruit : r));
+        setSelected(recruit);
+        if (res?.demo) {
+          showToast('⚠️ Could not save — server offline or session expired. Please refresh.', 'error');
+        } else {
+          showToast('❌ Status update failed. Try again.', 'error');
+        }
+      } else {
+        if (newStatus === 'Onboarding') {
+          showToast(`${recruit.name} moved to Onboarding! Mildred's queue notified.`);
+        } else if (newStatus === 'Active') {
+          showToast(`${recruit.name} is now Active! User record created in Users (Orca).`);
+        } else if (newStatus === 'Declined') {
+          showToast(`${recruit.name} marked as Declined.`, 'info');
+        } else {
+          showToast(`${recruit.name} moved to ${newStatus}.`);
+        }
+      }
+    } catch (err) {
+      // Rollback on error
+      setRecruits(prev => prev.map(r => r.id === recruit.id ? recruit : r));
+      setSelected(recruit);
+      if (err.message === 'SESSION_EXPIRED') {
+        showToast('⏱ Session expired — please log in again.', 'error');
+        setTimeout(() => window.location.reload(), 2000);
+      } else {
+        showToast(`❌ Save failed: ${err.message || 'Unknown error'}`, 'error');
+      }
     }
+
     setStatusUpdating(false);
-    return res;
   }
 
   function handleStepForward(recruit) {
