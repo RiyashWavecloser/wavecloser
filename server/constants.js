@@ -226,3 +226,14 @@ export const ROTATING_USA_CITIES = [
   'hartford',
 ];
 
+export const TARGET_MARKETS = [
+  { label: 'New York NY',       craigslistCity: 'newyork' },
+  { label: 'Miami FL',          craigslistCity: 'miami' },
+  { label: 'Houston TX',        craigslistCity: 'houston' },
+  { label: 'Dallas TX',         craigslistCity: 'dallas' },
+  { label: 'Chicago IL',        craigslistCity: 'chicago' },
+  { label: 'Atlanta GA',        craigslistCity: 'atlanta' },
+  { label: 'Los Angeles CA',    craigslistCity: 'losangeles' },
+];
+
+

@@ -14,7 +14,7 @@
 import Airtable from 'airtable';
 import dotenv from 'dotenv';
 import { sendEmail, buildRecruiterLeadEmail } from './emailService.js';
-import { RECRUITING_AGENTS } from './constants.js';
+import { RECRUITING_AGENTS, AGENTS } from './constants.js';
 dotenv.config();
 
 const API_KEY = process.env.AIRTABLE_API_KEY;
@@ -1400,22 +1400,30 @@ export async function getRecruitingAgents() {
  * This is the global permanent dedup registry. Check BEFORE assigning any resume.
  */
 export async function getGlobalResumeDeduplicationSet() {
-  if (!isConfigured()) return new Set();
+  if (!isConfigured()) {
+    console.warn('[Dedup] Airtable not configured — dedup disabled');
+    return new Set();
+  }
+
   try {
     const records = await retry(() =>
       base()('ResumeDeduplicationRegistry')
         .select({ fields: ['CraigslistURL'] })
         .all()
     );
+
     const set = new Set();
     records.forEach(r => {
-      const url = r.get('CraigslistURL');
-      if (url) set.add(url.trim().toLowerCase());
+      const url = (r.get('CraigslistURL') || '').trim().toLowerCase();
+      if (url) set.add(url);
     });
-    console.log(`[Dedup] ${set.size} resume URLs permanently locked`);
+
+    console.log(`[Dedup] Registry loaded: ${set.size} URLs locked`);
     return set;
   } catch (err) {
-    console.warn('[airtable] getGlobalResumeDeduplicationSet error:', err.message);
+    console.error('[Dedup] ResumeDeduplicationRegistry table error:', err.message);
+    console.error('[Dedup] ⚠ CREATE THIS TABLE IN AIRTABLE: ResumeDeduplicationRegistry');
+    console.error('[Dedup] Fields needed: CraigslistURL (text), FirstSeenAt (datetime), AssignedTo (text), AssignedDate (date)');
     return new Set();
   }
 }
@@ -1425,26 +1433,189 @@ export async function getGlobalResumeDeduplicationSet() {
  * Once a URL is here, it can NEVER be assigned to anyone again.
  */
 export async function registerResumeAsAssigned(url, assignedTo, assignedDate) {
-  if (!isConfigured() || !url) return;
+  if (!isConfigured()) return;
+
+  const normalizedUrl = (url || '').trim().toLowerCase();
+  if (!normalizedUrl) return;
+
   try {
     await retry(() =>
       base()('ResumeDeduplicationRegistry').create({
-        CraigslistURL: url.trim(), // Preserve exact case-sensitive URL
+        CraigslistURL: normalizedUrl,
         FirstSeenAt:   new Date().toISOString(),
         AssignedTo:    assignedTo || '',
         AssignedDate:  assignedDate || new Date().toISOString().slice(0, 10),
       })
     );
   } catch (err) {
-    console.warn('[airtable] registerResumeAsAssigned error:', err.message);
+    console.error(`[Dedup] Failed to register ${normalizedUrl}:`, err.message);
   }
 }
+
+
+export async function clearFakeResumeLeads() {
+  if (!isConfigured()) return { success: false, error: 'Airtable not configured' };
+  try {
+    const records = await retry(() =>
+      base()('ResumeLeads')
+        .select({
+          filterByFormula: `OR(
+            FIND("waveclosers", LOWER({Email})),
+            FIND("waveclosers", LOWER({CraigslistURL})),
+            FIND("synth-candidate", LOWER({CraigslistURL})),
+            FIND("Energetic sales professional", {Description}),
+            FIND("demo", LOWER({Title})),
+            FIND("test", LOWER({Title})),
+            FIND("sample", LOWER({Title})),
+            {CraigslistURL} = ""
+          )`
+        })
+        .all()
+    );
+
+    const ids = records.map(r => r.id);
+    console.log(`[Cleanup Resume Leads] Found ${ids.length} fake/demo resume leads to delete`);
+
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await retry(() => base()('ResumeLeads').destroy(batch));
+    }
+
+    return { success: true, deleted: ids.length };
+  } catch (err) {
+    console.error('[Cleanup Resume Leads] error:', err.message);
+    throw err;
+  }
+}
+
+export async function clearFakeBusinessLeads() {
+  if (!isConfigured()) return { success: false, error: 'Airtable not configured' };
+  try {
+    const records = await retry(() =>
+      base()('Leads')
+        .select({
+          filterByFormula: `OR(
+            FIND("demo", LOWER({PlaceID})),
+            FIND("synth", LOWER({PlaceID})),
+            FIND("demo", LOWER({BusinessName})),
+            FIND("test", LOWER({BusinessName})),
+            FIND("sample", LOWER({BusinessName})),
+            FIND("waveclosers", LOWER({BusinessName}))
+          )`
+        })
+        .all()
+    );
+
+    const ids = records.map(r => r.id);
+    console.log(`[Cleanup Business Leads] Found ${ids.length} fake/demo business leads to delete`);
+
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await retry(() => base()('Leads').destroy(batch));
+    }
+
+    return { success: true, deleted: ids.length };
+  } catch (err) {
+    console.error('[Cleanup Business Leads] error:', err.message);
+    return { success: false, deleted: 0 };
+  }
+}
+
+export async function clearFakeRecruits() {
+  if (!isConfigured()) return { success: false, error: 'Airtable not configured' };
+  try {
+    const records = await retry(() =>
+      base()('RecruitingPipeline')
+        .select({
+          filterByFormula: `OR(
+            FIND("waveclosers", LOWER({Email})),
+            FIND("demo", LOWER({Name})),
+            FIND("test", LOWER({Name})),
+            FIND("sample", LOWER({Name})),
+            FIND("synthetic", LOWER({Notes}))
+          )`
+        })
+        .all()
+    );
+
+    const ids = records.map(r => r.id);
+    console.log(`[Cleanup Recruits] Found ${ids.length} fake/demo recruits to delete`);
+
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await retry(() => base()('RecruitingPipeline').destroy(batch));
+    }
+
+    return { success: true, deleted: ids.length };
+  } catch (err) {
+    console.error('[Cleanup Recruits] error:', err.message);
+    return { success: false, deleted: 0 };
+  }
+}
+
+export async function clearFakeAutomationLogs() {
+  if (!isConfigured()) return { success: false, error: 'Airtable not configured' };
+  try {
+    const records = await retry(() =>
+      base()('AutomationLog')
+        .select({
+          filterByFormula: `OR(
+            FIND("resume", LOWER({Task})),
+            FIND("demo", LOWER({Task})),
+            FIND("synthetic", LOWER({Task})),
+            FIND("demo", LOWER({Target})),
+            FIND("synthetic", LOWER({Target})),
+            FIND("waveclosers", LOWER({Target})),
+            FIND("exhausted", LOWER({Target}))
+          )`
+        })
+        .all()
+    );
+
+    const ids = records.map(r => r.id);
+    console.log(`[Cleanup AutomationLog] Found ${ids.length} log entries to delete`);
+
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await retry(() => base()('AutomationLog').destroy(batch));
+    }
+
+    return { success: true, deleted: ids.length };
+  } catch (err) {
+    console.error('[Cleanup AutomationLog] error:', err.message);
+    return { success: false, deleted: 0 };
+  }
+}
+
+
 
 /**
  * Save a single resume lead to the ResumeLeads working list.
  */
+
 export async function saveResumeLead(data) {
   if (!isConfigured()) return null;
+
+  // STRICT BLOCK — Reject saving any demo/synthetic candidate resume leads
+  const email = (data.email || '').toLowerCase();
+  const url   = (data.craigslistUrl || '').toLowerCase();
+  const desc  = (data.description || '').toLowerCase();
+  const title = (data.title || '').toLowerCase();
+
+  if (
+    email.includes('waveclosers-candidate.com') ||
+    email.includes('synth-candidate') ||
+    url.includes('synth-candidate') ||
+    desc.includes('energetic sales professional based in') ||
+    title.includes('alex b.') ||
+    title.includes('jordan j.') ||
+    title.includes('taylor g.') ||
+    title.includes('morgan m.')
+  ) {
+    console.warn('[airtable] STRICT BLOCK: Rejected saving demo/synthetic candidate resume lead:', data.title);
+    return null;
+  }
+
   try {
     const rec = await retry(() =>
       base()('ResumeLeads').create({
@@ -1460,6 +1631,7 @@ export async function saveResumeLead(data) {
         CreatedAt:     new Date().toISOString(),
       })
     );
+
     return {
       id:            rec.id,
       title:         rec.get('Title')         || '',
@@ -1882,17 +2054,43 @@ export async function createNotification({ recipientEmail, type = 'new_leads_ass
   }
 }
 
+function buildRecipientFormula(rawRecipient) {
+  const raw = (rawRecipient || '').trim();
+  if (!raw) return '';
+  const cleanEmail = raw.toLowerCase();
+  const cleanPrefix = raw.split('@')[0].trim().toLowerCase();
+
+  const matchedAgent = (AGENTS || []).find(a =>
+    (a.email && a.email.toLowerCase() === cleanEmail) ||
+    (a.name  && a.name.toLowerCase()  === cleanEmail) ||
+    (a.name  && a.name.toLowerCase()  === cleanPrefix) ||
+    (a.id    && a.id.toLowerCase()    === cleanEmail)
+  );
+
+  const targets = new Set([cleanEmail, cleanPrefix]);
+  if (matchedAgent) {
+    if (matchedAgent.email) targets.add(matchedAgent.email.toLowerCase());
+    if (matchedAgent.name)  targets.add(matchedAgent.name.toLowerCase());
+  }
+
+  const conditions = Array.from(targets).map(t => `LOWER({RecipientEmail}) = "${t.replace(/"/g, '\\"')}"`);
+  return conditions.length > 1 ? `OR(${conditions.join(',')})` : conditions[0];
+}
+
 /**
- * Fetch notifications for a specific agent email.
+ * Fetch notifications for a specific agent email or name.
  * Returns { notifications, unreadCount }.
  */
 export async function fetchNotifications(recipientEmail) {
   if (!isConfigured()) return { notifications: [], unreadCount: 0 };
+  const filterFormula = buildRecipientFormula(recipientEmail);
+  if (!filterFormula) return { notifications: [], unreadCount: 0 };
+
   try {
     const records = await retry(() =>
       base()('Notifications')
         .select({
-          filterByFormula: `{RecipientEmail} = "${recipientEmail}"`,
+          filterByFormula: filterFormula,
           sort: [{ field: 'CreatedAt', direction: 'desc' }],
           maxRecords: 50,
         })
@@ -1908,15 +2106,18 @@ export async function fetchNotifications(recipientEmail) {
 }
 
 /**
- * Mark ALL notifications as read for a given agent email.
+ * Mark ALL notifications as read for a given agent email or name.
  */
 export async function markNotificationsRead(recipientEmail) {
   if (!isConfigured()) return;
+  const recipientFormula = buildRecipientFormula(recipientEmail);
+  if (!recipientFormula) return;
+
   try {
     const records = await retry(() =>
       base()('Notifications')
         .select({
-          filterByFormula: `AND({RecipientEmail} = "${recipientEmail}", {IsRead} = FALSE())`,
+          filterByFormula: `AND(${recipientFormula}, {IsRead} = FALSE())`,
         })
         .all()
     );

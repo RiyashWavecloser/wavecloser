@@ -361,16 +361,14 @@ export async function generateLeads({ location, businessTypes, radius = 5, reque
   console.log(`  Yelp Fusion:   ${hasYelp   ? '✓ active (backup source)'  : '✗ no key — skipping'}`);
 
   if (isDemo) {
-    console.log('  [leads] ⚠ No API keys — returning demo data (not saved to Airtable)');
-    const { SEED_LEADS } = await import('../src/data/seed.js').catch(() => ({ SEED_LEADS: [] }));
-    const demoLeads = SEED_LEADS?.length ? SEED_LEADS : generateDemoLeads(location, businessTypes);
-    const filtered  = demoLeads.filter(l => businessTypes.includes(l.type)).sort((a, b) => b.score - a.score);
+    console.log('  [leads] ⚠ No API keys configured (GOOGLE_PLACES_API_KEY / YELP_API_KEY missing) — aborting lead generation.');
     return {
-      leads: filtered.slice(0, maxLeads),
-      stats: { google: 0, yelp: 0, merged: filtered.length, fresh: filtered.length, scored: Math.min(filtered.length, maxLeads), saved: 0, duplicatesFiltered: 0 },
+      leads: [],
+      stats: { google: 0, yelp: 0, merged: 0, fresh: 0, scored: 0, saved: 0, duplicatesFiltered: 0 },
       demo: true,
     };
   }
+
 
   // STEP 1 — ALWAYS fetch global dedup set FIRST (before any API calls)
   const globalDedupeSet = await getGlobalDeduplicationSet();
@@ -456,11 +454,16 @@ export async function generateLeads({ location, businessTypes, radius = 5, reque
   let merged = mergeAndDeduplicate(allGoogle, allYelp);
   console.log(`  [leads] Merged: ${merged.length} unique businesses (Google: ${allGoogle.length}, Yelp: ${allYelp.length})`);
 
-  // Fallback: If external APIs returned 0 results (e.g. expired Yelp key or missing Google key), generate clean synthetic leads so distribution NEVER halts
+  // If external APIs returned 0 results (e.g. expired Yelp key or missing Google key), log warning and return empty
   if (merged.length === 0) {
-    console.warn(`  [leads] ⚠️ External APIs returned 0 results for ${location}. Generating synthetic fallback leads to ensure distribution continuity...`);
-    merged = generateDemoLeads(location, businessTypes);
+    console.warn(`  [leads] ⚠️ External APIs returned 0 results for ${location}. No leads generated.`);
+    return {
+      leads: [],
+      stats: { google: allGoogle.length, yelp: allYelp.length, merged: 0, fresh: 0, capped: 0, scored: 0, saved: 0, duplicatesFiltered: 0 },
+      demo: false,
+    };
   }
+
 
   // STEP 5 — Filter against global dedup set (PlaceID + Phone)
   const freshLeads = merged.filter(lead => {

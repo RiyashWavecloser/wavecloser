@@ -8,14 +8,33 @@ import { PageHeader } from '../components/ui.jsx';
 import RecruitingPipelineView from '../components/RecruitingPipelineView.jsx';
 import ResumePerformanceTab from '../components/ResumePerformanceTab.jsx';
 import BulkAssignModal from '../components/BulkAssignModal.jsx';
+import { clearFakeResumeLeadsAPI } from '../lib/dataLayer.js';
 
 const ADMIN_ROLES = ['admin', 'pm', 'sponsor', 'recruiter', 'wave_closer_recruiter'];
 
 export default function RecruiterPortal({ currentUser }) {
   const [activeTab,      setActiveTab]      = useState('pipeline');
   const [showBulkAssign, setShowBulkAssign] = useState(false);
+  const [clearing,       setClearing]       = useState(false);
 
   const canViewPerformance = ADMIN_ROLES.includes(currentUser?.role);
+
+  async function handleClearFakeLeads() {
+    if (!window.confirm('This will delete all demo/fake leads from the system. Real leads from Apify will replace them after next distribution. Continue?')) return;
+    setClearing(true);
+    try {
+      const data = await clearFakeResumeLeadsAPI();
+      if (data.success) {
+        alert(`✓ Deleted ${data.deleted} fake leads. Click "Run Distribution Now" to fetch real ones from Apify.`);
+      } else {
+        alert(`Error: ${data.error || data.message || 'Failed to clear fake leads'}`);
+      }
+    } catch (err) {
+      alert(`Error clearing fake leads: ${err.message}`);
+    } finally {
+      setClearing(false);
+    }
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
@@ -27,14 +46,25 @@ export default function RecruiterPortal({ currentUser }) {
             subtitle="Workflow B — Find, manage, and onboard salespeople"
           />
         </div>
-        {canViewPerformance && (
-          <button
-            onClick={() => setShowBulkAssign(true)}
-            style={S.bulkBtn}
-          >
-            🔍 Bulk Assign Resumes
-          </button>
-        )}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          {currentUser?.role === 'admin' && (
+            <button
+              onClick={handleClearFakeLeads}
+              disabled={clearing}
+              style={S.dangerBtn}
+            >
+              {clearing ? '⏳ Clearing...' : '🗑 Clear Demo/Fake Leads'}
+            </button>
+          )}
+          {canViewPerformance && (
+            <button
+              onClick={() => setShowBulkAssign(true)}
+              style={S.bulkBtn}
+            >
+              🔍 Bulk Assign Resumes
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Tab bar */}
@@ -76,8 +106,10 @@ export default function RecruiterPortal({ currentUser }) {
 const S = {
   header:      { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '0 0 8px', flexWrap: 'wrap', gap: 12 },
   bulkBtn:     { padding: '10px 20px', background: 'linear-gradient(135deg, #1F4E79, #2D9B5E)', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: "'Inter', sans-serif", marginTop: 4, flexShrink: 0 },
+  dangerBtn:   { padding: '10px 16px', background: '#D9381E', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: "'Inter', sans-serif", marginTop: 4, flexShrink: 0 },
   tabBar:      { display: 'flex', borderBottom: '2px solid #EBE6DC', background: '#fff', padding: '0', marginBottom: 0 },
   tabBtn:      { padding: '14px 20px', border: 'none', background: 'none', fontSize: 13, fontWeight: 600, color: '#888', cursor: 'pointer', fontFamily: "'Inter', sans-serif", borderBottom: '2px solid transparent', marginBottom: -2, transition: 'all 0.2s', whiteSpace: 'nowrap' },
   tabBtnActive: { color: '#1F4E79', borderBottom: '2px solid #1F4E79' },
   content:     { minHeight: 400 },
 };
+

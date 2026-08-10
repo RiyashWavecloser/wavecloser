@@ -146,15 +146,24 @@ export default function AgentPortal({ currentUser, onLogout }) {
   const loadNotifications = useCallback(async () => {
     if (isSupervisor) return;
     const data = await fetchMyNotifications();
-    if (data && !data.demo) {
-      setNotifications(data.notifications || []);
-      setUnreadCount(data.unreadCount || 0);
+    if (data) {
+      const list = data.notifications || [];
+      const newUnread = data.unreadCount || 0;
+      setNotifications(list);
+      setUnreadCount(newUnread);
+
+      // If new unread notifications arrived while viewing, refresh leads automatically
+      if (newUnread > unreadCount && unreadCount > 0) {
+        showToast('🔔 You have new lead notifications!', 'info');
+        loadMyLeads();
+        loadMyResumeLeads();
+      }
     }
-  }, [isSupervisor]);
+  }, [isSupervisor, unreadCount, loadMyLeads]);
 
   useEffect(() => {
     loadNotifications();
-    const interval = setInterval(loadNotifications, 30000);
+    const interval = setInterval(loadNotifications, 10000); // Poll every 10 seconds
     return () => clearInterval(interval);
   }, [loadNotifications]);
 

@@ -759,3 +759,15 @@ export async function markNotificationRead(id) {
     return { ok: false, demo: true };
   }
 }
+
+/**
+ * Clear all demo/fake resume leads from Airtable (Admin only).
+ */
+export async function clearFakeResumeLeadsAPI() {
+  try {
+    return await post('/api/resume-leads/clear-fake-leads', {});
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+

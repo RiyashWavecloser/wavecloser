@@ -62,14 +62,23 @@ import {
   saveResumeLead,
   registerResumeAsAssigned,
   verifyAirtableTables,
+  clearFakeResumeLeads,
+  clearFakeBusinessLeads,
+  clearFakeRecruits,
+  clearFakeAutomationLogs,
+
+
   // Notifications (Req 4)
+  createNotification,
   fetchNotifications,
   markNotificationsRead,
   markNotificationRead,
 } from './airtableClient.js';
 import { generateLeads } from './leadWorker.js';
 import { distributeDailyLeads, distributeResumeLeads } from './automationWorker.js';
+import { fetchViaApify } from './apifyClient.js';
 import {
+
   isConfigured as emailReady,
   sendEmail,
   buildResetCodeEmail,
@@ -1303,98 +1312,66 @@ app.get('/api/resume-leads/stats', requireResumeAdmin, async (req, res) => {
  * Body: { cities: string[], keywords?: string, leadsPerAgent?: number }
  * Cities are specified by the admin — NOT hardcoded.
  */
-app.post('/api/resume-leads/distribute-now', requireResumeAdmin, async (req, res) => {
+app.post('/api/resume-leads/distribute-now', requireAuth, async (req, res) => {
+  // Only admin/pm/recruiter can trigger this
+  if (!['admin', 'pm', 'recruiter', 'sponsor'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Not authorized' });
+  }
+
+  if (!process.env.APIFY_API_KEY) {
+    return res.status(400).json({
+      error: 'APIFY_API_KEY not configured in Railway environment variables. Add it first.',
+      success: false,
+    });
+  }
+
   try {
-    const {
-      cities     = [],
-      keywords   = RESUME_SEARCH_KEYWORDS,
-      leadsPerAgent = DAILY_RESUME_LEADS_PER_WCR,
-    } = req.body || {};
-
-    if (!cities.length) {
-      return res.status(400).json({ error: 'cities array is required — select at least one city' });
-    }
-
-    // Run distribution asynchronously and respond immediately
-    res.json({ started: true, cities, keywords, leadsPerAgent });
-
-    // Import distributeResumeLeads from automationWorker is not possible (circular),
-    // so we call the distribution logic inline here.
-    setImmediate(async () => {
-      try {
-        const agents = await getRecruitingAgents();
-        if (!agents.length) {
-          await appendLog({ task: 'Manual distribution skipped', target: 'No recruiting agents found', status: 'alert' });
-          return;
-        }
-
-        const globalDedupeSet = await getGlobalResumeDeduplicationSet();
-        let freshResumes = [];
-
-        for (const citySlug of cities) {
-          try {
-            const results = await searchCraigslistResumes(citySlug, keywords, 100);
-            const newOnly = results.filter(r => {
-              const url = (r.link || '').trim().toLowerCase();
-              return url && !globalDedupeSet.has(url);
-            });
-            freshResumes = [...freshResumes, ...newOnly.map(r => ({ ...r, market: CITY_SUBDOMAINS[citySlug] || citySlug }))];
-            console.log(`[Manual Dist] ${citySlug}: ${results.length} found, ${newOnly.length} new`);
-          } catch (e) {
-            console.error(`[Manual Dist] Failed ${citySlug}:`, e.message);
-          }
-        }
-
-        // De-dup within this batch
-        const seen = new Set();
-        freshResumes = freshResumes.filter(r => {
-          const url = (r.link || '').trim().toLowerCase();
-          if (seen.has(url)) return false;
-          seen.add(url);
-          return true;
-        });
-
-        console.log(`[Manual Dist] ${freshResumes.length} fresh resumes, distributing to ${agents.length} agents (Round-Robin)`);
-        const buckets = {};
-        for (const a of agents) {
-          buckets[a.name] = [];
-        }
-
-        let pool = [...freshResumes];
-        let agentIndex = 0;
-
-        while (pool.length > 0) {
-          const agent = agents[agentIndex];
-          if (buckets[agent.name].length < leadsPerAgent) {
-            buckets[agent.name].push(pool.shift());
-          }
-          agentIndex = (agentIndex + 1) % agents.length;
-          const allFull = agents.every(a => buckets[a.name].length >= leadsPerAgent);
-          if (allFull) break;
-        }
-
-        for (const agent of agents) {
-          const batch = buckets[agent.name];
-          if (!batch.length) {
-            await appendLog({ task: 'Resume distribution skipped', target: `${agent.name} — pool exhausted`, status: 'alert' });
-            continue;
-          }
-          const result = await bulkAssignResumeLeads(batch, agent.name, '');
-          await appendLog({ task: 'Manual resume leads assigned', target: `${agent.name} → ${result.assigned} leads (${result.skipped} skipped)`, status: 'ok' });
-          console.log(`[Manual Dist] ${agent.name}: ${result.assigned} assigned, ${result.skipped} skipped`);
-        }
-
-        console.log('[Manual Dist] Complete');
-      } catch (err) {
-        console.error('[Manual Dist] Error:', err.message);
-        await appendLog({ task: 'Manual distribution error', target: err.message, status: 'error' }).catch(() => {});
-      }
+    console.log(`[Manual Distribution] Triggered by ${req.user.email}`);
+    await distributeResumeLeads(); // same real function as the cron job
+    res.json({
+      success: true,
+      message: 'Distribution complete — real Craigslist resumes assigned via Apify',
     });
   } catch (err) {
-    console.error('[proxy] POST /api/resume-leads/distribute-now:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[Manual Distribution] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// POST /api/resume-leads/clear-fake-leads
+// Admin only — clear all fake/demo leads across ResumeLeads, Leads, and RecruitingPipeline
+app.post('/api/resume-leads/clear-fake-leads', requireAuth, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin only' });
+  }
+
+  try {
+    const resumeRes   = await clearFakeResumeLeads();
+    const businessRes = await clearFakeBusinessLeads();
+    const recruitsRes = await clearFakeRecruits();
+    const logsRes     = await clearFakeAutomationLogs();
+
+    const totalDeleted = (resumeRes.deleted || 0) + (businessRes.deleted || 0) + (recruitsRes.deleted || 0) + (logsRes.deleted || 0);
+
+    res.json({
+      success: true,
+      deleted: totalDeleted,
+      details: {
+        resumeLeads:   resumeRes.deleted   || 0,
+        businessLeads: businessRes.deleted || 0,
+        recruits:      recruitsRes.deleted || 0,
+        automationLogs: logsRes.deleted    || 0,
+      },
+      message: `Deleted ${totalDeleted} demo/fake records (${resumeRes.deleted || 0} resume leads, ${businessRes.deleted || 0} business leads, ${recruitsRes.deleted || 0} recruits, ${logsRes.deleted || 0} log entries).`,
+    });
+
+  } catch (err) {
+    console.error('[Cleanup] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 
 /**
  * GET /api/resume-leads/dedup-stats
@@ -1452,6 +1429,16 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
     }
     try {
       const result = await bulkAssignResumeLeads(resumes, targetAgent, market || city);
+      if (result.assigned > 0) {
+        const targetAgentObj = (AGENTS || []).find(a => a.name.toLowerCase() === targetAgent.toLowerCase());
+        const recipientEmail = targetAgentObj?.email || targetAgent;
+        await createNotification({
+          recipientEmail,
+          type:           'new_leads_assigned',
+          title:          `📄 ${result.assigned} Resume Lead${result.assigned > 1 ? 's' : ''} Assigned by Manager`,
+          message:        `Project Manager assigned ${result.assigned} candidate resume lead(s) to you (${market || city}).`,
+        }).catch(err => console.warn('[proxy] createNotification error:', err.message));
+      }
       return res.json({
         success: true,
         assigned: result.assigned,
@@ -1591,6 +1578,17 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
       }
 
       summary.push({ agent: agentName, assigned: batch.length });
+
+      if (batch.length > 0) {
+        const agentObj = (AGENTS || []).find(a => a.name.toLowerCase() === agentName.toLowerCase());
+        const recipientEmail = agentObj?.email || agentName;
+        await createNotification({
+          recipientEmail,
+          type:           'new_leads_assigned',
+          title:          `📄 ${batch.length} Resume Lead${batch.length > 1 ? 's' : ''} Assigned by Manager`,
+          message:        `Project Manager assigned ${batch.length} candidate resume lead(s) to you from ${citiesInput.join(', ')}.`,
+        }).catch(err => console.warn('[proxy] createNotification error:', err.message));
+      }
 
       await appendLog({
         task:   'Bulk resume leads assigned',
