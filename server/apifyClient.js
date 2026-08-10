@@ -21,7 +21,7 @@ export async function fetchViaApify(citySlug, keywords, limit = 100) {
   console.log(`[Apify] Scraping: ${searchUrl}`);
 
   const response = await fetch(
-    `https://api.apify.com/v2/acts/apify~craigslist-scraper/run-sync-get-dataset-items?token=${apiKey}&timeout=120&memory=512`,
+    `https://api.apify.com/v2/acts/petrpatek~craigslist-scraper/run-sync-get-dataset-items?token=${apiKey}&timeout=120&memory=512`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -34,6 +34,7 @@ export async function fetchViaApify(citySlug, keywords, limit = 100) {
       }),
     }
   );
+
 
   if (!response.ok) {
     const errText = await response.text();

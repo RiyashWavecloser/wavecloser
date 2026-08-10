@@ -17,7 +17,8 @@
     "worker:test": "node server/automationWorker.js --test-mode",
     "leads": "node server/leadWorker.js",
     "leads:test": "node server/leadWorker.js --test-mode",
-    "dev:all": "concurrently --names \"vite,proxy,worker,leads\" --prefix-colors \"cyan,yellow,magenta,green\" \"npm run dev\" \"npm run server\" \"npm run worker\" \"npm run leads\""
+    "dev:all": "concurrently --names \"vite,proxy\" --prefix-colors \"cyan,yellow\" \"npm run dev\" \"npm run server\""
+
   },
   "dependencies": {
     "airtable": "^0.12.2",

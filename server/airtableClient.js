@@ -1660,12 +1660,32 @@ export async function saveResumeLead(data) {
 export async function getResumeLeadsByAgent(agentName, date) {
   if (!isConfigured() || !agentName) return [];
   try {
-    const cleanName = (agentName || '').split('@')[0].trim();
-    const formulas = [
-      `OR({AssignedTo} = "${agentName}", {AssignedTo} = "${cleanName}", LOWER({AssignedTo}) = "${cleanName.toLowerCase()}")`
-    ];
-    if (date) formulas.push(`DATETIME_FORMAT({AssignedDate}, 'YYYY-MM-DD') = "${date}"`);
-    const formula = formulas.length > 1 ? `AND(${formulas.join(',')})` : formulas[0];
+    const rawName = (agentName || '').trim();
+    const cleanName = rawName.split('@')[0].replace(/[._-]/g, ' ').trim();
+    const firstName = cleanName.split(' ')[0];
+
+    const terms = [rawName, cleanName, firstName];
+
+    // Look up Staff record to get canonical display name if email was passed
+    if (rawName.includes('@')) {
+      const staffRec = await getStaff(rawName).catch(() => null);
+      if (staffRec && staffRec.name) terms.push(staffRec.name);
+    }
+
+    const uniqueTerms = [...new Set(terms.filter(Boolean))];
+    const orConditions = uniqueTerms.map(t =>
+      `LOWER({AssignedTo}) = "${t.toLowerCase()}"`
+    );
+
+    if (firstName.length >= 3) {
+      orConditions.push(`FIND("${firstName.toLowerCase()}", LOWER({AssignedTo})) > 0`);
+    }
+
+    const assignedFormula = `OR(${orConditions.join(',')})`;
+    const formula = date
+      ? `AND(${assignedFormula}, DATETIME_FORMAT({AssignedDate}, 'YYYY-MM-DD') = "${date}")`
+      : assignedFormula;
+
     const records = await retry(() =>
       base()('ResumeLeads')
         .select({
@@ -1674,6 +1694,7 @@ export async function getResumeLeadsByAgent(agentName, date) {
         })
         .all()
     );
+
     return records.map(r => ({
       id:            r.id, // ← AIRTABLE RECORD ID (rec...)
       title:         r.get('Title')         || '',

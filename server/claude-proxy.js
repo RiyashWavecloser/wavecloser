@@ -1018,21 +1018,28 @@ async function searchCraigslistResumesSingleKeyword(cityInput, keywords, limit =
   const citySlug = toCraigslistSlug(cityInput);
 
   const APIFY_KEY = process.env.APIFY_API_KEY;
-  let apifyErrorMsg = null;
 
+  // 1. Try Apify first (highest quality — full post content + contact info)
   if (APIFY_KEY) {
     try {
-      const results = await fetchViaApify(citySlug, keywords, limit, APIFY_KEY);
-      return results;
+      const results = await fetchViaApify(citySlug, keywords, limit);
+      if (results.length > 0) return results;
+      console.warn('[Craigslist] Apify returned 0 results, falling back to CL SAPI');
     } catch (e) {
-      apifyErrorMsg = e.message;
-      console.warn('[Craigslist] Apify failed, falling back to RSS:', e.message);
+      console.warn('[Craigslist] Apify failed, falling back to CL SAPI:', e.message);
     }
-  } else {
-    apifyErrorMsg = 'No APIFY_API_KEY configured';
   }
 
-  // RSS fallback — if Apify throws error or no API key
+  // 2. CL SAPI fallback — Craigslist's own internal JSON API (no Apify needed, always works)
+  try {
+    const results = await fetchViaCLSAPI(citySlug, keywords, limit);
+    if (results.length > 0) return results;
+    console.warn('[Craigslist] CL SAPI returned 0 results, trying RSS');
+  } catch (sapiErr) {
+    console.warn('[Craigslist] CL SAPI failed, trying RSS:', sapiErr.message);
+  }
+
+  // 3. RSS last resort
   try {
     return await fetchViaRSS(citySlug, keywords, limit);
   } catch (rssErr) {
@@ -1040,6 +1047,7 @@ async function searchCraigslistResumesSingleKeyword(cityInput, keywords, limit =
     return [];
   }
 }
+
 
 /**
  * Multi-keyword Craigslist resume search.
@@ -1117,6 +1125,98 @@ function toCraigslistSlug(cityInput) {
 
 
 
+// ─── Craigslist SAPI (internal JSON API — no Apify needed) ────────────────────
+// Maps city slugs to their Craigslist areaId numbers
+const CL_AREA_IDS = {
+  newyork:        1,
+  sfbay:          9,
+  losangeles:     300,
+  chicago:        178,
+  seattle:        301,
+  miami:          351,
+  houston:        392,
+  dallas:         393,
+  atlanta:        90,
+  boston:         130,
+  philadelphia:   437,
+  washington:     271,
+  washingtondc:   271,
+  denver:         140,
+  phoenix:        390,
+  sandiego:       310,
+  minneapolis:    340,
+  detroit:        160,
+  portland:       450,
+  orlando:        420,
+  tampa:          467,
+  nashville:      375,
+  charlotte:      137,
+  lasvegas:       287,
+  newjersey:      170,
+  jerseycity:     170,
+  newark:         170,
+  connecticut:    445,
+  newhaven:       445,
+  statenisland:   1,
+  // Fallback — default to sfbay which always has results
+  default:        9,
+};
+
+/**
+ * Fetch resumes from Craigslist's internal SAPI (JSON).
+ * Does NOT require Apify or any paid scraper — queries the same API the CL browser app uses.
+ * Note: The SAPI returns national results (not city-specific). The city param is used
+ * only for the market label on the resulting leads.
+ */
+async function fetchViaCLSAPI(citySlug, keywords, limit = 50) {
+  // The SAPI only works with batch size 360 — other values return 400
+  const url = `https://sapi.craigslist.org/web/v8/postings/search/full?batch=1-0-360-0-0&cc=US&lang=en&query=${encodeURIComponent(keywords)}&searchPath=res`;
+
+  console.log(`[CL-SAPI] Fetching resumes: city=${citySlug} query="${keywords}"`);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  let res;
+  try {
+    res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Referer': 'https://www.craigslist.org/',
+      },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!res.ok) throw new Error(`CL SAPI returned ${res.status}`);
+
+  const json = await res.json();
+  const rawItems = json?.data?.items || [];
+
+  // The SAPI encodes items as compact arrays:
+  // [postingId, price, categoryId, locationIdx, locationStr, flagCount, [imgCount,imgId], [pathLen,path], title]
+  // Index 8 = title, index 7 = [pathLen, path-slug]
+  const results = rawItems
+    .filter(item => Array.isArray(item) && item.length >= 9)
+    .map(item => {
+      const title    = String(item[8] || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').trim();
+      const pathSlug = Array.isArray(item[7]) ? item[7][1] : String(item[7] || '');
+      const postingId = item[0];
+      const link     = `https://www.craigslist.org/res/${pathSlug}.html`;
+      return { title, link, postingId, description: '', phone: '', email: '', date: '', source: 'cl-sapi', market: citySlug };
+    })
+    .filter(item => item.title && item.link && !item.link.includes('waveclosers.com'))
+    .slice(0, limit);
+
+
+  console.log(`[CL-SAPI] ${rawItems.length} raw items → ${results.length} usable resumes`);
+  return results;
+}
+
+
 async function fetchViaRSS(citySlug, keywords, limit) {
   const url = `https://${citySlug}.craigslist.org/search/res?query=${encodeURIComponent(keywords)}&format=rss&sort=date`;
   console.log('[Craigslist RSS] Fallback fetch:', url);
@@ -1179,6 +1279,7 @@ async function fetchViaRSS(citySlug, keywords, limit) {
   console.log(`[Craigslist RSS] ${items.length} resumes found for ${citySlug}`);
   return items;
 }
+
 
 // ─── Resume Lead Distribution API (Workflow C) ───────────────────────────────
 
@@ -1723,8 +1824,9 @@ app.patch('/api/notifications/:id/read', requireAuth, async (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n[Wave Closers Proxy] ✓ Running on http://localhost:${PORT}`);
+
   console.log(`  Claude:   ${ANTHROPIC_KEY ? '✓ ready' : '✗ no key'}`);
   console.log(`  Airtable: ${airtableReady() ? '✓ connected' : '✗ not configured'}`);
   console.log(`  Email:    ${emailReady() ? '✓ Resend ready' : '✗ demo mode (console)'}`);

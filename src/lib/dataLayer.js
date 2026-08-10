@@ -15,8 +15,9 @@
  *   checkServerHealth()         → { status, claude, airtable, email }
  */
 
-const PROXY = (import.meta.env.VITE_CLAUDE_PROXY_URL || 'http://localhost:3001/api/claude')
+const PROXY = (import.meta.env.VITE_CLAUDE_PROXY_URL || '')
   .replace('/api/claude', '');
+
 
 let _token = localStorage.getItem('wc_session_token') || null;
 
@@ -33,10 +34,30 @@ export function setSession(token, user, mustChangePassword = false) {
   }
 }
 
+function isTokenExpired(token) {
+  if (!token) return true;
+  try {
+    const base64Body = token.split('.')[0];
+    const payload = JSON.parse(atob(base64Body.replace(/-/g, '+').replace(/_/g, '/')));
+    return !payload.exp || payload.exp < Date.now();
+  } catch {
+    return true;
+  }
+}
+
 export function getSession() {
   const token = localStorage.getItem('wc_session_token');
   const userStr = localStorage.getItem('wc_session_user');
   const mustChange = localStorage.getItem('wc_session_must_change') === '1';
+
+  // Clear expired token immediately so API calls don't fire with a dead token
+  if (token && isTokenExpired(token)) {
+    localStorage.removeItem('wc_session_token');
+    localStorage.removeItem('wc_session_user');
+    localStorage.removeItem('wc_session_must_change');
+    return { token: null, user: null, mustChangePassword: false };
+  }
+
   try {
     return {
       token,
@@ -47,6 +68,7 @@ export function getSession() {
     return { token: null, user: null, mustChangePassword: false };
   }
 }
+
 
 export function clearMustChangePassword() {
   localStorage.setItem('wc_session_must_change', '0');
@@ -68,11 +90,22 @@ async function get(path) {
   const token = localStorage.getItem('wc_session_token') || _token;
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  
+
+  // Skip request entirely if no token — prevents 401 flood before login
+  if (!token) throw new Error('No session token');
+
   const res = await fetch(`${PROXY}${path}`, { headers });
   if (res.status === 401) {
     setSession(null);
-    window.location.reload();
+    // Only reload if we're not already at the login screen (avoids infinite loop)
+    if (!window.__wc_logging_out) {
+      window.__wc_logging_out = true;
+      setTimeout(() => {
+        window.__wc_logging_out = false;
+        window.location.reload();
+      }, 300);
+    }
+    throw new Error('SESSION_EXPIRED');
   }
   if (!res.ok) throw new Error(`GET ${path} → ${res.status}`);
   return res.json();
