@@ -127,23 +127,22 @@ const app = express();
 // Enable trust proxy for correct IP detection behind Railway/Vercel
 app.set('trust proxy', 1);
 
-app.use(cors({
+const corsOptions = {
   origin: (origin, cb) => {
-    // Allow non-browser requests (curl, mobile, backend-to-backend)
-    if (!origin) return cb(null, true);
-    // Allow localhost during dev
-    if (origin.includes('localhost') || origin.includes('127.0.0.1')) return cb(null, true);
-    // Allow configured ALLOWED_ORIGINS or wildcard
-    if (ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.includes('*')) return cb(null, true);
-    // Allow Railway, Vercel, Netlify, custom domains
-    if (origin.includes('waveclosers') || origin.includes('railway.app') || origin.includes('vercel.app')) return cb(null, true);
-    // Fallback: allow all origins to guarantee global access for remote agents (e.g. Philippines)
-    return cb(null, true);
+    // Non-browser requests (curl, server-to-server)
+    if (!origin) return cb(null, '*');
+    // Return exact origin string so Access-Control-Allow-Origin is set (required with credentials: true)
+    return cb(null, origin);
   },
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
   credentials: true,
-}));
+  optionsSuccessStatus: 200,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
 
 app.use(express.json({ limit: '2mb' }));
 
@@ -1116,67 +1115,7 @@ function toCraigslistSlug(cityInput) {
   return str.replace(/\s+/g, '');
 }
 
-async function fetchViaApify(citySlug, keywords, limit, apiKey) {
-  const searchUrl = `https://${citySlug}.craigslist.org/search/res?query=${encodeURIComponent(keywords)}&sort=date`;
-  console.log(`[Craigslist Apify] Scraping ${searchUrl} (limit ${limit})`);
 
-  const response = await fetch(
-    `https://api.apify.com/v2/acts/solidcode~craigslist-scraper/run-sync-get-dataset-items?timeout=120&memory=512`,
-    {
-      method:  'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        startUrls: [{ url: searchUrl }],
-        maxItems:  limit,
-      }),
-      signal: AbortSignal.timeout(130000), // 130s — Apify sync timeout is 120s
-    }
-  );
-
-  if (!response.ok) {
-    const errText = await response.text().catch(() => response.statusText);
-    let parsed = errText;
-    try {
-      const j = JSON.parse(errText);
-      if (j?.error?.message) parsed = j.error.message;
-    } catch {}
-    throw new Error(`Apify HTTP ${response.status}: ${parsed.slice(0, 200)}`);
-  }
-
-  const data = await response.json();
-  if (!Array.isArray(data)) throw new Error(`Apify returned non-array: ${JSON.stringify(data).slice(0, 200)}`);
-
-  const items = data.filter(r => r && r.title).slice(0, limit).map(r => {
-    const desc           = r.description || r.postingBody || '';
-    const phoneFromDesc  = desc.match(/\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}/)?.[0] || '';
-    const emailFromDesc  = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0] || '';
-
-    // Standardize URL: use numeric postId format when available (immune to 404/case issues)
-    let validUrl = '';
-    const region = r.region || citySlug;
-    if (r.postId) {
-      validUrl = `https://${region}.craigslist.org/res/${r.postId}.html`;
-    } else {
-      validUrl = (r.url || r.link || '').trim();
-    }
-
-    return {
-      title:       r.title       || 'Untitled',
-      description: desc.slice(0, 500),
-      phone:       r.phone       || phoneFromDesc || '',
-      email:       r.email       || r.replyEmail  || emailFromDesc || '',
-      link:        validUrl,
-      date:        r.postedAt    || r.date        || '',
-      market:      citySlug,
-    };
-  });
-
-  console.log(`[Craigslist Apify] ${items.length} resumes returned for ${citySlug}`);
-  return items;
-}
 
 async function fetchViaRSS(citySlug, keywords, limit) {
   const url = `https://${citySlug}.craigslist.org/search/res?query=${encodeURIComponent(keywords)}&format=rss&sort=date`;
