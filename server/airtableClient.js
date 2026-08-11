@@ -982,33 +982,49 @@ export async function getUnassignedLeads(limit = 6000) {
   });
 }
 
+export function isRealAgentName(name) {
+  if (!name || typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  if (/^agent\s*[-_]?\s*\d+$/i.test(trimmed)) return false;
+  if (/^(demo|test|sample|placeholder)\s*agent/i.test(trimmed)) return false;
+  return true;
+}
+
 /**
- * Fetch all agent-type staff accounts from Staff table.
- * Falls back to confirmed AGENTS constants list if Airtable returns empty or errors.
+ * Fetch all real agent-type staff accounts from Staff table.
+ * Excludes generic placeholders (Agent 1, Agent 2, etc.) to ensure leads go only to real users.
  */
 export async function listAgents() {
-  if (!isConfigured()) return AGENTS;
+  const realAgentsFallback = AGENTS.filter(a => isRealAgentName(a.name));
+  if (!isConfigured()) return realAgentsFallback;
   try {
     const records = await retry(() =>
       base()('Staff').select().all()
     );
-    if (!records || !records.length) return AGENTS;
+    if (!records || !records.length) return realAgentsFallback;
     const staffList = records.map(r => ({
       email: (r.get('Email') || '').toLowerCase().trim(),
       name:  (r.get('Name') || '').trim(),
       role:  (r.get('Role') || 'cold_caller').toLowerCase().trim(),
-    })).filter(s => s.name && s.email);
+    })).filter(s => s.name && s.email && isRealAgentName(s.name));
 
-    return staffList.length ? staffList : AGENTS;
+    return staffList.length ? staffList : realAgentsFallback;
   } catch (err) {
     console.warn('[airtable] listAgents error (falling back to constants):', err.message);
-    return AGENTS;
+    return realAgentsFallback;
   }
 }
 
 
+
+
+
 export async function assignLeadsToAgent(leadsToAssign, agentName) {
   if (!isConfigured() || !leadsToAssign || !leadsToAssign.length) return;
+  if (!isRealAgentName(agentName)) {
+    console.warn(`[airtable] STRICT BLOCK: Refusing to assign leads to placeholder agent "${agentName}"`);
+    return;
+  }
   const chunks = [];
   const chunkSize = 10;
   for (let i = 0; i < leadsToAssign.length; i += chunkSize) {
@@ -1016,16 +1032,19 @@ export async function assignLeadsToAgent(leadsToAssign, agentName) {
   }
   for (const chunk of chunks) {
     const records = chunk.map(l => ({
-      id: l._airtableId,
+      id: l._airtableId || l.id,
       fields: {
         Status: 'Assigned',
         AssignedAgent: agentName
       }
-    }));
-    await retry(() => base()('Leads').update(records));
+    })).filter(r => r.id);
+    if (records.length > 0) {
+      await retry(() => base()('Leads').update(records));
+    }
     await sleep(200);
   }
 }
+
 
 export async function checkAndRefillAgentLeads(agentName) {
   if (!isConfigured()) return 0;
@@ -1467,6 +1486,16 @@ export async function clearFakeResumeLeads() {
             FIND("demo", LOWER({Title})),
             FIND("test", LOWER({Title})),
             FIND("sample", LOWER({Title})),
+            FIND("agent 1", LOWER({AssignedTo})),
+            FIND("agent 2", LOWER({AssignedTo})),
+            FIND("agent 3", LOWER({AssignedTo})),
+            FIND("agent 4", LOWER({AssignedTo})),
+            FIND("agent 5", LOWER({AssignedTo})),
+            FIND("agent 6", LOWER({AssignedTo})),
+            FIND("agent 7", LOWER({AssignedTo})),
+            FIND("agent 8", LOWER({AssignedTo})),
+            FIND("agent 9", LOWER({AssignedTo})),
+            FIND("agent 10", LOWER({AssignedTo})),
             {CraigslistURL} = ""
           )`
         })
@@ -1500,6 +1529,16 @@ export async function clearFakeBusinessLeads() {
             FIND("demo", LOWER({BusinessName})),
             FIND("test", LOWER({BusinessName})),
             FIND("sample", LOWER({BusinessName})),
+            FIND("agent 1", LOWER({AssignedAgent})),
+            FIND("agent 2", LOWER({AssignedAgent})),
+            FIND("agent 3", LOWER({AssignedAgent})),
+            FIND("agent 4", LOWER({AssignedAgent})),
+            FIND("agent 5", LOWER({AssignedAgent})),
+            FIND("agent 6", LOWER({AssignedAgent})),
+            FIND("agent 7", LOWER({AssignedAgent})),
+            FIND("agent 8", LOWER({AssignedAgent})),
+            FIND("agent 9", LOWER({AssignedAgent})),
+            FIND("agent 10", LOWER({AssignedAgent})),
             FIND("waveclosers", LOWER({BusinessName}))
           )`
         })
@@ -1520,6 +1559,7 @@ export async function clearFakeBusinessLeads() {
     return { success: false, deleted: 0 };
   }
 }
+
 
 export async function clearFakeRecruits() {
   if (!isConfigured()) return { success: false, error: 'Airtable not configured' };
@@ -1610,11 +1650,13 @@ export async function saveResumeLead(data) {
     title.includes('alex b.') ||
     title.includes('jordan j.') ||
     title.includes('taylor g.') ||
-    title.includes('morgan m.')
+    title.includes('morgan m.') ||
+    (data.assignedTo && !isRealAgentName(data.assignedTo))
   ) {
-    console.warn('[airtable] STRICT BLOCK: Rejected saving demo/synthetic candidate resume lead:', data.title);
+    console.warn('[airtable] STRICT BLOCK: Rejected saving demo/synthetic/placeholder resume lead:', data.title || data.assignedTo);
     return null;
   }
+
 
   try {
     const rec = await retry(() =>
@@ -1954,7 +1996,12 @@ export async function getResumeLeadStats({ dateFilter, marketFilter, agentFilter
  */
 export async function bulkAssignResumeLeads(resumes, agentName, market) {
   if (!isConfigured()) return { assigned: 0, skipped: 0, demo: true };
+  if (!isRealAgentName(agentName)) {
+    console.warn(`[airtable] STRICT BLOCK: Refusing to bulk assign resume leads to placeholder agent "${agentName}"`);
+    return { assigned: 0, skipped: resumes ? resumes.length : 0, demo: false };
+  }
   const today = new Date().toISOString().slice(0, 10);
+
 
   const globalDedupeSet = await getGlobalResumeDeduplicationSet();
   let assigned = 0;
@@ -2017,7 +2064,11 @@ export async function verifyAirtableTables() {
  * Used by the morning/midday cron distribution (Req 3).
  */
 export async function assignLeadToAgent(leadAirtableId, agentName) {
-  if (!isConfigured()) return;
+  if (!isConfigured() || !leadAirtableId) return;
+  if (!isRealAgentName(agentName)) {
+    console.warn(`[airtable] STRICT BLOCK: Refusing to assign lead to placeholder agent "${agentName}"`);
+    return;
+  }
   return retry(async () => {
     await base()('Leads').update(leadAirtableId, {
       Status:        'Assigned',
@@ -2025,6 +2076,7 @@ export async function assignLeadToAgent(leadAirtableId, agentName) {
     });
   });
 }
+
 
 // ─── Notifications Table (Req 4) ─────────────────────────────────────────────
 // Table must be created manually in Airtable:

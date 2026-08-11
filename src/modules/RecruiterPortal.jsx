@@ -8,7 +8,7 @@ import { PageHeader } from '../components/ui.jsx';
 import RecruitingPipelineView from '../components/RecruitingPipelineView.jsx';
 import ResumePerformanceTab from '../components/ResumePerformanceTab.jsx';
 import BulkAssignModal from '../components/BulkAssignModal.jsx';
-import { clearFakeResumeLeadsAPI } from '../lib/dataLayer.js';
+import { clearFakeResumeLeadsAPI, purgeDemoDataAPI } from '../lib/dataLayer.js';
 
 const ADMIN_ROLES = ['admin', 'pm', 'sponsor', 'recruiter', 'wave_closer_recruiter'];
 
@@ -16,6 +16,7 @@ export default function RecruiterPortal({ currentUser }) {
   const [activeTab,      setActiveTab]      = useState('pipeline');
   const [showBulkAssign, setShowBulkAssign] = useState(false);
   const [clearing,       setClearing]       = useState(false);
+  const [purging,        setPurging]        = useState(false);
 
   const canViewPerformance = ADMIN_ROLES.includes(currentUser?.role);
 
@@ -33,6 +34,33 @@ export default function RecruiterPortal({ currentUser }) {
       alert(`Error clearing fake leads: ${err.message}`);
     } finally {
       setClearing(false);
+    }
+  }
+
+  async function handlePurgeDemoData() {
+    const confirmed = window.confirm(
+      'This will permanently delete ALL demo/fake leads from the production Airtable.\n\n' +
+      'Specifically removes:\n' +
+      '- Leads with demo/fake descriptions\n' +
+      '- Any leads with @waveclosers.com in description\n' +
+      '- Any leads without valid Craigslist URLs\n' +
+      '- Leads assigned to placeholder agents (Agent 1, Agent 2, etc.)\n\n' +
+      'This cannot be undone. Continue?'
+    );
+    if (!confirmed) return;
+
+    setPurging(true);
+    try {
+      const data = await purgeDemoDataAPI();
+      if (data.success) {
+        alert(`✓ ${data.message}`);
+      } else {
+        alert(`Error: ${data.error}`);
+      }
+    } catch (e) {
+      alert(`Failed: ${e.message}`);
+    } finally {
+      setPurging(false);
     }
   }
 
@@ -56,6 +84,16 @@ export default function RecruiterPortal({ currentUser }) {
               {clearing ? '⏳ Clearing...' : '🗑 Clear Demo/Fake Leads'}
             </button>
           )}
+          {['admin', 'pm'].includes(currentUser?.role) && (
+            <button
+              onClick={handlePurgeDemoData}
+              disabled={purging}
+              style={{ ...S.dangerBtn, background: '#7B1FA2', marginBottom: 0 }}
+            >
+              {purging ? '⏳ Purging...' : '🗑️ Purge All Demo Data'}
+            </button>
+          )}
+
           {canViewPerformance && (
             <button
               onClick={() => setShowBulkAssign(true)}

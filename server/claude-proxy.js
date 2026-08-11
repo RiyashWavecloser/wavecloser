@@ -73,10 +73,13 @@ import {
   fetchNotifications,
   markNotificationsRead,
   markNotificationRead,
+  isRealAgentName,
 } from './airtableClient.js';
+
 import { generateLeads } from './leadWorker.js';
 import { distributeDailyLeads, distributeResumeLeads } from './automationWorker.js';
-import { fetchViaApify } from './apifyClient.js';
+import { fetchViaApify, fetchCraigslistResumesWithFallback } from './apifyClient.js';
+
 import {
 
   isConfigured as emailReady,
@@ -535,9 +538,13 @@ app.post('/api/leads/assign', async (req, res) => {
   if (!leadIds?.length || !agent) {
     return res.status(400).json({ error: 'leadIds[] and agent are required' });
   }
+  if (!isRealAgentName(agent)) {
+    return res.status(400).json({ error: `Cannot assign leads to placeholder agent "${agent}"` });
+  }
   if (!airtableReady()) {
     return res.json({ demo: true, assigned: leadIds.length });
   }
+
   try {
     let assigned = 0;
     for (const placeId of leadIds) {
@@ -563,6 +570,76 @@ app.post('/api/leads/auto-distribute-now', async (req, res) => {
   }
 });
 
+app.post('/api/leads/clear-fake-leads', async (req, res) => {
+  try {
+    const result = await clearFakeBusinessLeads();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/resume-leads/clear-fake-leads', async (req, res) => {
+  try {
+    const result = await clearFakeResumeLeads();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/resume-leads/purge-demo-data', requireAuth, async (req, res) => {
+  if (!['admin', 'pm'].includes(req.user?.role)) {
+    return res.status(403).json({ error: 'Admin or PM only' });
+  }
+  if (!airtableReady()) return res.status(500).json({ error: 'Airtable not configured' });
+
+  try {
+    // Step 1: Purge demo/fake resume leads
+    const resumeResult = await clearFakeResumeLeads();
+
+    // Step 2: Also delete any dedup registry entries with invalid/fake URLs
+    const { getGlobalResumeDeduplicationSet } = await import('./airtableClient.js').then(m => m);
+
+    // Use a direct Airtable query to find fake dedup entries
+    let dedupCleaned = 0;
+    try {
+      const { default: Airtable } = await import('airtable');
+      const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
+      const dedupRecords = await base('ResumeDeduplicationRegistry').select({
+        filterByFormula: `OR(
+          NOT(FIND("https://", LOWER({CraigslistURL}))),
+          FIND("waveclosers.com", LOWER({CraigslistURL})),
+          FIND("example.com", LOWER({CraigslistURL})),
+          {CraigslistURL} = ""
+        )`
+      }).all();
+
+      const dedupIds = dedupRecords.map(r => r.id);
+      for (let i = 0; i < dedupIds.length; i += 10) {
+        await base('ResumeDeduplicationRegistry').destroy(dedupIds.slice(i, i + 10));
+      }
+      dedupCleaned = dedupIds.length;
+      console.log(`[Purge] Deleted ${dedupCleaned} fake dedup registry entries`);
+    } catch (dedupErr) {
+      console.warn('[Purge] Dedup registry cleanup warning:', dedupErr.message);
+    }
+
+    const deleted = resumeResult.deleted || 0;
+    res.json({
+      success:      true,
+      deleted,
+      dedupCleaned,
+      message: `✓ Deleted ${deleted} demo leads and ${dedupCleaned} fake dedup entries. Run distribution now to get real leads from across the USA.`,
+    });
+
+  } catch (err) {
+    console.error('[Purge] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Also add resume-leads distribute-now route that was accidentally removed
 app.post('/api/resume-leads/distribute-now', async (req, res) => {
   try {
     console.log('[proxy] Triggering daily resume lead distribution now...');
@@ -573,6 +650,8 @@ app.post('/api/resume-leads/distribute-now', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
 
 async function handleLeadPatch(req, res) {
   const { id } = req.params;
@@ -1016,37 +1095,9 @@ app.get('/api/resume-leads/craigslist-search', async (req, res) => {
 
 async function searchCraigslistResumesSingleKeyword(cityInput, keywords, limit = 50) {
   const citySlug = toCraigslistSlug(cityInput);
-
-  const APIFY_KEY = process.env.APIFY_API_KEY;
-
-  // 1. Try Apify first (highest quality — full post content + contact info)
-  if (APIFY_KEY) {
-    try {
-      const results = await fetchViaApify(citySlug, keywords, limit);
-      if (results.length > 0) return results;
-      console.warn('[Craigslist] Apify returned 0 results, falling back to CL SAPI');
-    } catch (e) {
-      console.warn('[Craigslist] Apify failed, falling back to CL SAPI:', e.message);
-    }
-  }
-
-  // 2. CL SAPI fallback — Craigslist's own internal JSON API (no Apify needed, always works)
-  try {
-    const results = await fetchViaCLSAPI(citySlug, keywords, limit);
-    if (results.length > 0) return results;
-    console.warn('[Craigslist] CL SAPI returned 0 results, trying RSS');
-  } catch (sapiErr) {
-    console.warn('[Craigslist] CL SAPI failed, trying RSS:', sapiErr.message);
-  }
-
-  // 3. RSS last resort
-  try {
-    return await fetchViaRSS(citySlug, keywords, limit);
-  } catch (rssErr) {
-    console.warn('[Craigslist] RSS fallback failed:', rssErr.message);
-    return [];
-  }
+  return await fetchCraigslistResumesWithFallback(citySlug, keywords, limit);
 }
+
 
 
 /**

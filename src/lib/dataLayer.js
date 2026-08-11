@@ -804,3 +804,14 @@ export async function clearFakeResumeLeadsAPI() {
   }
 }
 
+/**
+ * Purge ALL demo/fake resume leads from Airtable production (Admin/PM only).
+ * Also cleans the dedup registry of any fake entries.
+ */
+export async function purgeDemoDataAPI() {
+  try {
+    return await post('/api/resume-leads/purge-demo-data', {});
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}

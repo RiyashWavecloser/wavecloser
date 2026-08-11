@@ -26,11 +26,13 @@ import {
   updateUser,
   appendLog,
   getLeads,
+
   getUnassignedLeads,
   assignLeadsToAgent,
   assignLeadToAgent,
   getMondayOfCurrentWeek,
   listAgents,
+  isRealAgentName,
   // Resume Lead Distribution (Workflow C)
   getRecruitingAgents,
   getGlobalResumeDeduplicationSet,
@@ -50,9 +52,10 @@ import {
   buildLearningEnrollmentEmail,
   buildTrainingInviteEmail,
 } from './emailService.js';
-import { BENCHMARKS, WEEKLY_LEADS_PER_AGENT, NUM_AGENTS, AGENTS, CITY_SUBDOMAINS, DAILY_RESUME_LEADS_PER_WCR, RESUME_SEARCH_KEYWORDS, RESUME_SEARCH_KEYWORDS_LIST, ROTATING_USA_CITIES, TARGET_MARKETS } from './constants.js';
+import { BENCHMARKS, WEEKLY_LEADS_PER_AGENT, NUM_AGENTS, AGENTS, DAILY_RESUME_LEADS_PER_WCR, RESUME_SEARCH_KEYWORDS_LIST, ALL_USA_CRAIGSLIST_CITIES, ALL_USA_BUSINESS_MARKETS } from './constants.js';
 import { generateLeads } from './leadWorker.js';
-import { fetchViaApify } from './apifyClient.js';
+import { fetchViaApify, fetchCraigslistResumesWithFallback } from './apifyClient.js';
+
 
 dotenv.config();
 
@@ -294,37 +297,26 @@ async function poll() {
 
 // ─── Weekly Lead Model Helpers ────────────────────────────────────────────────
 
-// Helper to generate synthetic demo leads when Airtable/APIs are in demo mode
-function generateManyDemoLeads(count, location = 'Nashville, TN') {
-  const types = ['restaurant', 'beauty_salon', 'nail_salon', 'deli', 'massage', 'small_retail'];
-  const names = ['Kitchen', 'Palace', 'Corner', 'Express', 'Studio', 'Lounge', 'Lab', 'Elite', 'Bar', 'Market', 'Touch', 'Gift Shop', 'Boutique'];
-  const prefixes = ['Luxe', 'Grand', 'Zen', 'Urban', 'Metro', 'Royal', 'Lively', 'Happy', 'Golden', 'Star', 'First', 'Next'];
-  
-  const leads = [];
-  for (let i = 1; i <= count; i++) {
-    const type = types[i % types.length];
-    const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-    const name = names[Math.floor(Math.random() * names.length)];
-    const bName = `${prefix} ${type.replace('_', ' ')} ${name}`;
-    leads.push({
-      placeId: `demo-gen-${i}-${Date.now()}`,
-      businessName: bName,
-      type,
-      address: `${100 + i} Main St, ${location}`,
-      phone: `(555) 555-${String(1000 + i).slice(-4)}`,
-      website: i % 3 === 0 ? `https://demo-${i}.com` : '',
-      rating: +(3.5 + Math.random() * 1.5).toFixed(1),
-      reviewCount: Math.floor(20 + Math.random() * 500),
-      score: Math.floor(40 + Math.random() * 55),
-      scoreReason: 'Demo lead — connect API keys for real scoring.',
-      status: 'New',
-      assignedAgent: '',
-      calledAt: null,
-      outcome: '',
-      market: location,
-    });
+/**
+ * Returns today's rotating batch of 20 Craigslist cities from the full USA list.
+ * Cycles through all ~300 cities over time so different cities are searched each day.
+ * This prevents shortfalls by ensuring the pool is always fresh and geographically diverse.
+ */
+function getCitiesForToday() {
+  const allCities = ALL_USA_CRAIGSLIST_CITIES;
+  const batchSize = 20; // search 20 cities per day
+  const today     = new Date();
+  const dayOfYear = Math.floor((today - new Date(today.getFullYear(), 0, 0)) / 86400000);
+  const startIndex = (dayOfYear * batchSize) % allCities.length;
+
+  const batch = [];
+  for (let i = 0; i < batchSize; i++) {
+    batch.push(allCities[(startIndex + i) % allCities.length]);
   }
-  return leads;
+
+  const batchNum = Math.floor((dayOfYear * batchSize) / allCities.length) + 1;
+  console.log(`[Worker] Today's city batch #${batchNum} (day ${dayOfYear}): ${batch.map(c => c.label).join(', ')}`);
+  return batch;
 }
 
 // Friday 5pm Weekly Lead Performance Report
@@ -438,35 +430,40 @@ export async function distributeDailyLeads(session = 'morning') {
     : parseInt(process.env.MIDDAY_LEADS_PER_AGENT)  || 40;
 
   // Get all cold-calling agents (from Airtable Staff table or AGENTS fallback)
+  // Filters out generic placeholder accounts like "Agent 1", "Agent 2"
   const agentsList = await listAgents().catch(() => AGENTS);
   const coldCallers = agentsList.filter(a =>
-    !a.role || a.role.includes('cold') || a.role.includes('rep') || a.role.includes('reseller') || a.role.includes('agent')
+    a.name && isRealAgentName(a.name) &&
+    (!a.role || a.role.includes('cold') || a.role.includes('rep') || a.role.includes('reseller') || a.role.includes('agent'))
   );
-  const effectiveCallers = coldCallers.length ? coldCallers : AGENTS;
+  const effectiveCallers = coldCallers.length ? coldCallers : AGENTS.filter(a => isRealAgentName(a.name));
 
-  console.log(`[Worker] ${session}: distributing ${perAgent} leads to ${effectiveCallers.length} agents`);
+  console.log(`[Worker] ${session}: distributing ${perAgent} leads to ${effectiveCallers.length} real agents`);
 
   // Get unassigned leads from Leads table
   const needed     = effectiveCallers.length * perAgent;
   let unassigned   = await getUnassignedLeads(needed * 2);
 
-  // Auto-generation fallback: if unassigned leads in DB are insufficient, generate fresh ones on the fly!
+  // Auto-generation fallback: if unassigned leads in DB are insufficient, generate fresh ones across USA markets!
   if (unassigned.length < needed) {
-    console.log(`[Worker] ${session}: Only ${unassigned.length} unassigned leads in DB (need ${needed}). Triggering auto-lead generation...`);
-    const targetMarkets = (process.env.LEAD_GENERATION_MARKETS || 'Miami FL,Houston TX,Atlanta GA,Chicago IL,Dallas TX')
-      .split(',').map(m => m.trim()).filter(Boolean);
-    const businessTypes = ['restaurant', 'beauty_salon', 'nail_salon', 'deli', 'massage', 'small_retail'];
+    console.log(`[Worker] ${session}: Only ${unassigned.length} unassigned leads in DB (need ${needed}). Triggering USA-wide auto-lead generation...`);
+    const envMarkets = process.env.LEAD_GENERATION_MARKETS ? process.env.LEAD_GENERATION_MARKETS.split(',').map(m => m.trim()).filter(Boolean) : null;
+    const targetMarkets = envMarkets || ALL_USA_BUSINESS_MARKETS;
+    const businessTypes = ['restaurant', 'beauty_salon', 'nail_salon', 'deli', 'massage', 'small_retail', 'auto_repair', 'contractor', 'dentist', 'real_estate_agency'];
 
-    for (const market of targetMarkets) {
+    // Rotate/shuffle markets so different runs target different nationwide US cities
+    const shuffledMarkets = [...targetMarkets].sort(() => Math.random() - 0.5);
+
+    for (const market of shuffledMarkets) {
+      if (unassigned.length >= needed * 1.5) break;
       try {
-        console.log(`[Worker] Auto-generating fresh leads for market: ${market}...`);
-        await generateLeads({ location: market, businessTypes, radius: 5, maxLeads: 100 });
+        console.log(`[Worker] Auto-generating fresh leads for USA market: ${market}...`);
+        await generateLeads({ location: market, businessTypes, radius: 10, maxLeads: 100 });
+        unassigned = await getUnassignedLeads(needed * 2);
       } catch (err) {
         console.error(`[Worker] Auto-generation failed for ${market}:`, err.message);
       }
     }
-    // Re-fetch unassigned leads after fresh generation
-    unassigned = await getUnassignedLeads(needed * 2);
   }
 
   if (!unassigned.length) {
@@ -478,6 +475,7 @@ export async function distributeDailyLeads(session = 'morning') {
     console.warn(`[Worker] ${session}: no unassigned leads available even after generation`);
     return;
   }
+
 
   console.log(`[Worker] ${session}: ${unassigned.length} unassigned leads available for distribution`);
 
@@ -714,52 +712,56 @@ if (!TEST_MODE) {
 export async function distributeResumeLeads() {
   const today = new Date().toISOString().split('T')[0];
 
-  // CRITICAL CHECK — never run without Apify key in production
-  if (!process.env.APIFY_API_KEY) {
-    console.error('[Worker] APIFY_API_KEY not set — cannot distribute real leads. Aborting.');
-    await appendLog({
-      task:   'Resume distribution ABORTED',
-      target: 'APIFY_API_KEY not configured — add it to Railway environment variables',
-      status: 'error',
-    });
-    return; // hard stop — do NOT fall back to demo data
-  }
-
-  // Get all recruiting agents from Staff table
-  const agents = await getRecruitingAgents();
+  // Get all recruiting agents from Staff table (filtering out placeholder Agent 1, Agent 2, etc.)
+  const rawAgents = await getRecruitingAgents();
+  const agents = (rawAgents || []).filter(a => a.name && isRealAgentName(a.name));
   if (!agents || agents.length === 0) {
-    console.error('[Worker] No recruiting agents found in Staff table');
+    console.error('[Worker] No real recruiting agents found for resume distribution');
     return;
   }
-  console.log(`[Worker] ${agents.length} recruiting agents found`);
+  console.log(`[Worker] ${agents.length} real recruiting agents found for resume distribution`);
 
   // Load global dedup set FIRST before any API calls
   const globalDedupeSet = await getGlobalResumeDeduplicationSet();
   console.log(`[Worker] ${globalDedupeSet.size} URLs permanently locked in dedup registry`);
 
-  // Fetch real resumes from Craigslist via Apify across all target markets
-  const keywords = process.env.RESUME_SEARCH_KEYWORDS || 'sales';
-  const markets  = TARGET_MARKETS; // from constants.js
+  const keywordsList = (RESUME_SEARCH_KEYWORDS_LIST && RESUME_SEARCH_KEYWORDS_LIST.length)
+    ? RESUME_SEARCH_KEYWORDS_LIST
+    : [process.env.RESUME_SEARCH_KEYWORDS || 'sales'];
+
+  // Use today's rotating batch of cities from the full USA list
+  const markets = getCitiesForToday();
+  const needed   = agents.length * DAILY_RESUME_LEADS_PER_WCR;
 
   let allFreshResumes = [];
+  
+  // Shuffle markets for even distribution across nationwide USA cities
+  const shuffledMarkets = [...markets].sort(() => Math.random() - 0.5);
 
-  for (const market of markets) {
-    try {
-      console.log(`[Worker] Fetching resumes for ${market.label} via Apify...`);
-      const results = await fetchViaApify(market.craigslistCity, keywords, 100);
+  for (const market of shuffledMarkets) {
+    if (allFreshResumes.length >= needed * 1.5) break;
 
-      // Filter against dedup set immediately
-      const fresh = results.filter(r => {
-        const url = (r.link || '').trim().toLowerCase();
-        return url && !globalDedupeSet.has(url);
-      });
+    for (const kw of keywordsList) {
+      if (allFreshResumes.length >= needed * 1.5) break;
+      try {
+        console.log(`[Worker] Fetching resumes for ${market.label} (${market.slug}) kw="${kw}"...`);
+        const results = await fetchCraigslistResumesWithFallback(market.slug, kw, 30);
 
-      console.log(`[Worker] ${market.label}: ${results.length} fetched → ${fresh.length} fresh`);
-      allFreshResumes = [...allFreshResumes, ...fresh.map(r => ({ ...r, market: market.label }))];
-    } catch (err) {
-      console.error(`[Worker] Apify failed for ${market.label}:`, err.message);
+        // Filter against dedup set immediately
+        const fresh = results.filter(r => {
+          const url = (r.link || '').trim().toLowerCase();
+          return url && !globalDedupeSet.has(url);
+        });
+
+        console.log(`[Worker] ${market.label} ("${kw}"): ${results.length} fetched → ${fresh.length} fresh`);
+        allFreshResumes = [...allFreshResumes, ...fresh.map(r => ({ ...r, market: market.label }))];
+      } catch (err) {
+        console.error(`[Worker] Resume fetch failed for ${market.label} ("${kw}"):`, err.message);
+      }
     }
   }
+
+
 
   // Remove duplicates within this batch itself by URL
   const seen = new Set();
@@ -782,10 +784,10 @@ export async function distributeResumeLeads() {
     return;
   }
 
-  const needed = agents.length * DAILY_RESUME_LEADS_PER_WCR;
   if (allFreshResumes.length < needed) {
     console.warn(`[Worker] Only ${allFreshResumes.length} fresh resumes — need ${needed} for ${agents.length} agents`);
   }
+
 
   // ROUND-ROBIN distribution — not sequential batching
   // This ensures all agents get some leads even if pool is small
