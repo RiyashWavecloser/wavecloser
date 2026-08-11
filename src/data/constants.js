@@ -290,7 +290,7 @@ export const RECRUITING_AGENTS = [
   { name: 'April S',   email: 'aprils@waveclosers.com'   },
 ];
 
-export const CRAIGSLIST_CITIES = ALL_USA_CRAIGSLIST_CITIES.map(c => ({ label: c.label, value: c.slug }));
+
 
 // ─── ALL USA Craigslist Cities — Complete list across all 50 states ───────────
 
@@ -699,6 +699,5 @@ export const ALL_USA_CRAIGSLIST_CITIES = [
 // TARGET_MARKETS points to the full USA city list
 export const TARGET_MARKETS = ALL_USA_CRAIGSLIST_CITIES;
 
-
-
-
+// CRAIGSLIST_CITIES must be declared AFTER ALL_USA_CRAIGSLIST_CITIES to avoid TDZ error
+export const CRAIGSLIST_CITIES = ALL_USA_CRAIGSLIST_CITIES.map(c => ({ label: c.label, value: c.slug }));
