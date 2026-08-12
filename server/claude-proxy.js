@@ -19,6 +19,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import crypto from 'crypto';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import { spawn } from 'child_process';
 import {
   isConfigured as airtableReady,
@@ -146,8 +148,29 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
+// ─── Serve compiled frontend (SPA) ──────────────────────────────────────────
+// In production Railway deploys: 'npm run build' builds dist/, then this server
+// serves it. Without this, any non-API URL returns a browser "No webpage found".
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+const DIST_DIR   = path.resolve(__dirname, '../dist');
+
+// Serve static assets (JS, CSS, images) — only if dist/ exists (production build)
+if (fs.existsSync(DIST_DIR)) {
+  app.use(express.static(DIST_DIR, {
+    maxAge: '1h',      // cache static assets for 1 hour
+    etag:   true,
+  }));
+  console.log(`[proxy] ✓ Serving frontend from ${DIST_DIR}`);
+} else {
+  console.warn('[proxy] ⚠  dist/ not found — frontend not built yet. Run npm run build.');
+}
+
+
+// ─── Body parsing — MUST be before all API routes ─────────────────────────────
 app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // ─── Authentication ───────────────────────────────────────────────────────────
 
@@ -1907,4 +1930,21 @@ app.listen(PORT, '0.0.0.0', () => {
       console.log(`[proxy] ⚙️ Automation worker exited with code ${code}`);
     });
   }
+});
+
+// --- SPA Fallback - registered after ALL API routes ---
+// Any GET that did not match /api/* returns index.html so React handles routing.
+// This fixes the "No webpage was found" browser error cold callers were seeing.
+if (fs.existsSync(DIST_DIR)) {
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(DIST_DIR, 'index.html'));
+  });
+}
+
+// --- Crash protection - keep the server alive on unhandled errors ---
+process.on('uncaughtException', (err) => {
+  console.error('[Server] UNCAUGHT EXCEPTION (server kept alive):', err.message, err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Server] UNHANDLED REJECTION (server kept alive):', reason);
 });

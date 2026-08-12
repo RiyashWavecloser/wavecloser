@@ -20,6 +20,7 @@ const QualifierPortal   = lazy(() => import('./modules/QualifierPortal.jsx'));
 
 import { fetchUsersFromAPI, createUserAPI, updateUserAPI, deleteUserAPI, getSession, setSession, clearMustChangePassword, fetchQualifierQueueAPI, fetchLeadsFromAPI, loadLeadsFromStorage } from './lib/dataLayer.js';
 import { ROLE_USER_FILTER, canAccess, defaultView, ROLES, isAgentRole } from './data/roles.js';
+import ErrorBoundary from './components/ErrorBoundary.jsx';
 const RecruiterPortal = lazy(() => import('./modules/RecruiterPortal.jsx'));
 
 function ViewLoading() {
@@ -233,9 +234,11 @@ export default function App() {
   // All agent-type roles — standalone AgentPortal (no sidebar)
   if (isAgentRole(role)) {
     return (
-      <Suspense fallback={<ViewLoading />}>
-        <AgentPortal currentUser={session.user} onLogout={handleLogout} />
-      </Suspense>
+      <ErrorBoundary>
+        <Suspense fallback={<ViewLoading />}>
+          <AgentPortal currentUser={session.user} onLogout={handleLogout} />
+        </Suspense>
+      </ErrorBoundary>
     );
   }
 
@@ -262,50 +265,52 @@ export default function App() {
         />
 
         <Suspense fallback={<ViewLoading />}>
-          {safeView === 'dashboard'  && (
-            <Dashboard users={roleFilteredUsers} onSelectUser={setSelectedUser} uncalledLeadsCount={uncalledLeadsCount} />
-          )}
-          {safeView === 'users' && (
-            <Users
-              users={searchedUsers}
-              setUsers={setUsers}
-              onSelectUser={setSelectedUser}
-              onCreateUser={handleCreateUser}
-              onUpdateUser={handleUpdateUser}
-              onDeleteUser={handleDeleteUser}
-            />
-          )}
-          {safeView === 'onboarding' && (
-            <OnboardingFlow
-              users={roleFilteredUsers}
-              setUsers={setUsers}
-              onCreateUser={handleCreateUser}
-              onUpdateUser={handleUpdateUser}
-            />
-          )}
-          {safeView === 'automation' && <AutomationPanel users={roleFilteredUsers} />}
-          {safeView === 'franchise'  && <FranchiseResearch />}
-          {safeView === 'leads'      && <LeadGeneration users={users} setUsers={setUsers} setLeadBadge={setLeadBadge} />}
-          {safeView === 'data'       && (
-            <DataIntegration
-              dataMode={dataMode}
-              setDataMode={setDataMode}
-              users={roleFilteredUsers}
-              setUsers={setUsers}
-            />
-          )}
-          {safeView === 'settings'   && (
-            <Settings dataMode={dataMode} setDataMode={setDataMode} />
-          )}
-          {safeView === 'recruiter-portal' && (
-            <RecruiterPortal currentUser={session.user} />
-          )}
-          {safeView === 'qualifier-portal' && (
-            <QualifierPortal currentUser={session.user} onLogout={handleLogout} setUsers={setUsers} embedded />
-          )}
-          {safeView === 'qualifier-completed' && (
-            <QualifierPortal currentUser={session.user} onLogout={handleLogout} setUsers={setUsers} embedded completedView />
-          )}
+          <ErrorBoundary>
+            {safeView === 'dashboard'  && (
+              <Dashboard users={roleFilteredUsers} onSelectUser={setSelectedUser} uncalledLeadsCount={uncalledLeadsCount} />
+            )}
+            {safeView === 'users' && (
+              <Users
+                users={searchedUsers}
+                setUsers={setUsers}
+                onSelectUser={setSelectedUser}
+                onCreateUser={handleCreateUser}
+                onUpdateUser={handleUpdateUser}
+                onDeleteUser={handleDeleteUser}
+              />
+            )}
+            {safeView === 'onboarding' && (
+              <OnboardingFlow
+                users={roleFilteredUsers}
+                setUsers={setUsers}
+                onCreateUser={handleCreateUser}
+                onUpdateUser={handleUpdateUser}
+              />
+            )}
+            {safeView === 'automation' && <AutomationPanel users={roleFilteredUsers} />}
+            {safeView === 'franchise'  && <FranchiseResearch />}
+            {safeView === 'leads'      && <LeadGeneration users={users} setUsers={setUsers} setLeadBadge={setLeadBadge} />}
+            {safeView === 'data'       && (
+              <DataIntegration
+                dataMode={dataMode}
+                setDataMode={setDataMode}
+                users={roleFilteredUsers}
+                setUsers={setUsers}
+              />
+            )}
+            {safeView === 'settings'   && (
+              <Settings dataMode={dataMode} setDataMode={setDataMode} />
+            )}
+            {safeView === 'recruiter-portal' && (
+              <RecruiterPortal currentUser={session.user} />
+            )}
+            {safeView === 'qualifier-portal' && (
+              <QualifierPortal currentUser={session.user} onLogout={handleLogout} setUsers={setUsers} embedded />
+            )}
+            {safeView === 'qualifier-completed' && (
+              <QualifierPortal currentUser={session.user} onLogout={handleLogout} setUsers={setUsers} embedded completedView />
+            )}
+          </ErrorBoundary>
         </Suspense>
       </main>
 
