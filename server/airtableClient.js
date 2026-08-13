@@ -25,14 +25,21 @@ export function isConfigured() {
 }
 
 let _base = null;
-function base() {
+export function getBase() {
   if (!_base) {
-    if (!isConfigured()) throw new Error('[airtable] AIRTABLE_API_KEY or AIRTABLE_BASE_ID missing.');
+    if (!isConfigured()) return null;
     Airtable.configure({ apiKey: API_KEY });
     _base = new Airtable().base(BASE_ID);
   }
   return _base;
 }
+
+function base() {
+  const b = getBase();
+  if (!b) throw new Error('[airtable] AIRTABLE_API_KEY or AIRTABLE_BASE_ID missing.');
+  return b;
+}
+
 
 // ─── Retry with exponential backoff + jitter ─────────────────────────────────
 
@@ -1415,6 +1422,18 @@ export async function getRecruitingAgents() {
 
 
 /**
+ * Single normalization function used EVERYWHERE for resume URLs.
+ */
+export function normalizeResumeURL(url) {
+  return (url || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\/$/, '')     // remove trailing slash
+    .replace(/\?.*$/, '')   // remove query parameters
+    .replace(/#.*$/, '');   // remove hash fragments
+}
+
+/**
  * Fetch all CraigslistURLs ever assigned — returns a Set.
  * This is the global permanent dedup registry. Check BEFORE assigning any resume.
  */
@@ -1433,7 +1452,7 @@ export async function getGlobalResumeDeduplicationSet() {
 
     const set = new Set();
     records.forEach(r => {
-      const url = (r.get('CraigslistURL') || '').trim().toLowerCase();
+      const url = normalizeResumeURL(r.get('CraigslistURL'));
       if (url) set.add(url);
     });
 
@@ -1454,7 +1473,7 @@ export async function getGlobalResumeDeduplicationSet() {
 export async function registerResumeAsAssigned(url, assignedTo, assignedDate) {
   if (!isConfigured()) return;
 
-  const normalizedUrl = (url || '').trim().toLowerCase();
+  const normalizedUrl = normalizeResumeURL(url);
   if (!normalizedUrl) return;
 
   try {
@@ -1467,9 +1486,10 @@ export async function registerResumeAsAssigned(url, assignedTo, assignedDate) {
       })
     );
   } catch (err) {
-    console.error(`[Dedup] Failed to register ${normalizedUrl}:`, err.message);
+    console.warn(`[Dedup] Could not register ${normalizedUrl}: ${err.message}`);
   }
 }
+
 
 
 export async function clearFakeResumeLeads() {
@@ -1636,9 +1656,28 @@ export async function clearFakeAutomationLogs() {
 export async function saveResumeLead(data) {
   if (!isConfigured()) return null;
 
+  // VALIDATE URL before saving
+  const rawUrl = (data.craigslistUrl || data.url || data.link || '').trim();
+  const url = normalizeResumeURL(rawUrl);
+
+  const isValidCraigslistURL = (
+    url.startsWith('https://') &&
+    url.includes('craigslist.org') &&
+    (url.includes('/res/') || url.includes('/view/d/')) &&
+    !url.includes('waveclosers') &&
+    !url.includes('example.com') &&
+    !url.includes('/search/') &&
+    url.length > 30  // real URLs are longer than 30 chars
+  );
+
+
+  if (!isValidCraigslistURL) {
+    console.warn(`[saveResumeLead] SKIPPING invalid URL: "${rawUrl}"`);
+    return null; // never save a lead with a bad URL
+  }
+
   // STRICT BLOCK — Reject saving any demo/synthetic candidate resume leads
   const email = (data.email || '').toLowerCase();
-  const url   = (data.craigslistUrl || '').toLowerCase();
   const desc  = (data.description || '').toLowerCase();
   const title = (data.title || '').toLowerCase();
 
@@ -1647,6 +1686,10 @@ export async function saveResumeLead(data) {
     email.includes('synth-candidate') ||
     url.includes('synth-candidate') ||
     desc.includes('energetic sales professional based in') ||
+    desc.includes('proven track record in outbound phone outreach and merchant communication') ||
+    desc.includes('seeking cold calling, b2b sales, or appointment setting position') ||
+    desc.includes('connecticut / hartford seeking cold calling') ||
+    desc.includes('orlando, fl seeking cold calling') ||
     title.includes('alex b.') ||
     title.includes('jordan j.') ||
     title.includes('taylor g.') ||
@@ -1657,7 +1700,6 @@ export async function saveResumeLead(data) {
     return null;
   }
 
-
   try {
     const rec = await retry(() =>
       base()('ResumeLeads').create({
@@ -1665,7 +1707,7 @@ export async function saveResumeLead(data) {
         Description:   data.description   || '',
         Phone:         data.phone         || '',
         Email:         data.email         || '',
-        CraigslistURL: data.craigslistUrl || '',
+        CraigslistURL: rawUrl,
         Market:        data.market        || '',
         AssignedTo:    data.assignedTo    || '',
         AssignedDate:  data.assignedDate  || new Date().toISOString().slice(0, 10),
@@ -1673,6 +1715,8 @@ export async function saveResumeLead(data) {
         CreatedAt:     new Date().toISOString(),
       })
     );
+
+    console.log(`[saveResumeLead] ✓ Saved valid lead: ${rawUrl}`);
 
     return {
       id:            rec.id,
@@ -1694,6 +1738,7 @@ export async function saveResumeLead(data) {
     return null;
   }
 }
+
 
 /**
  * Get all resume leads assigned to a specific agent for a specific date.

@@ -810,8 +810,20 @@ export async function clearFakeResumeLeadsAPI() {
  */
 export async function purgeDemoDataAPI() {
   try {
-    return await post('/api/resume-leads/purge-demo-data', {});
+    return await post('/api/resume-leads/purge-all-demo', {});
   } catch (e) {
     return { success: false, error: e.message };
   }
 }
+
+/**
+ * Verify URL quality of all recent resume leads (Admin/PM only).
+ */
+export async function verifyURLsAPI() {
+  try {
+    return await get('/api/resume-leads/verify-urls');
+  } catch (e) {
+    return { total: 0, valid: 0, invalid: 0, invalidPercentage: '0%', samples: [], error: e.message };
+  }
+}
+

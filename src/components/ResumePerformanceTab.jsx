@@ -291,12 +291,21 @@ export default function ResumePerformanceTab({ currentUser }) {
                         </td>
                         <td style={{ ...S.td, fontSize: 12, color: '#777' }}>{lead.assignedDate}</td>
                         <td style={S.td}>
-                          {lead.craigslistUrl ? (
-                            <a href={lead.craigslistUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#5B8DEF', fontWeight: 600, textDecoration: 'none' }}>View</a>
-                          ) : (
-                            <span style={{ color: '#AAA' }}>—</span>
-                          )}
+                          {(() => {
+                            const url = (lead.craigslistUrl || '').trim();
+                            const hasValidUrl = url &&
+                              url.includes('craigslist.org') &&
+                              (url.includes('/res/') || url.includes('/view/d/')) &&
+                              !url.includes('/search/');
+                            return hasValidUrl ? (
+                              <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: '#5B8DEF', fontWeight: 600, textDecoration: 'none' }}>View ↗</a>
+                            ) : (
+                              <span style={{ color: '#AAA' }}>—</span>
+                            );
+                          })()}
                         </td>
+
+
                       </tr>
                     ))}
                   </tbody>

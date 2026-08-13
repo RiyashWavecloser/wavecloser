@@ -1157,16 +1157,30 @@ export default function RecruitingPipelineView({ currentUser }) {
                               )}
                             </div>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
-                              {result.link && (
-                                <a
-                                  href={result.link}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  style={{ ...S.outBtn, display: 'block', textAlign: 'center', fontSize: 12, padding: '7px 14px', textDecoration: 'none' }}
-                                >
-                                  View Post
-                                </a>
-                              )}
+                              {(() => {
+                                const url = (result.link || result.url || '').trim();
+                                const hasValidUrl = url &&
+                                  url.includes('craigslist.org') &&
+                                  (url.includes('/res/') || url.includes('/view/d/')) &&
+                                  !url.includes('/search/');
+                                return hasValidUrl ? (
+                                  <a
+                                    href={url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    style={{ ...S.outBtn, display: 'block', textAlign: 'center', fontSize: 12, padding: '7px 14px', textDecoration: 'none' }}
+                                    onClick={() => console.log('[Agent] Viewing post:', url)}
+                                  >
+                                    View Post ↗
+                                  </a>
+                                ) : (
+                                  <span style={{ fontSize: 11, color: '#AAA', textAlign: 'center', display: 'block', padding: '7px 14px' }}>
+                                    Link unavailable
+                                  </span>
+                                );
+                              })()}
+
+
                               <button
                                 id={`add-candidate-${idx}`}
                                 disabled={isAdding || isAdded}

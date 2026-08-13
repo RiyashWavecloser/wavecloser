@@ -56,6 +56,8 @@ import {
   // Resume Lead Distribution (Workflow C)
   getRecruitingAgents,
   getGlobalResumeDeduplicationSet,
+  normalizeResumeURL,
+  getBase,
   getResumeLeadsByAgent,
   getResumeLeadsByAgent as getResumeLeadsByRecruiter,
   updateResumeLeadStatus,
@@ -1484,6 +1486,149 @@ app.post('/api/resume-leads/clear-fake-leads', requireAuth, async (req, res) => 
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// GET /api/resume-leads/verify-urls
+// Admin/PM only — checks all recent leads and reports how many have valid URLs
+app.get('/api/resume-leads/verify-urls', requireAuth, async (req, res) => {
+  if (!['admin', 'pm'].includes(req.user?.role)) {
+    return res.status(403).json({ error: 'Admin only' });
+  }
+
+  const base = getBase();
+  if (!base) return res.status(500).json({ error: 'Airtable not configured' });
+
+  try {
+    const records = await base('ResumeLeads')
+      .select({ maxRecords: 200, sort: [{ field: 'AssignedDate', direction: 'desc' }] })
+      .all();
+
+    let validCount   = 0;
+    let invalidCount = 0;
+    const invalidSamples = [];
+
+    records.forEach(r => {
+      const url = (r.get('CraigslistURL') || '').trim().toLowerCase();
+      const isValid = url.startsWith('https://') &&
+        url.includes('craigslist.org') &&
+        (url.includes('/res/') || url.includes('/view/d/')) &&
+        !url.includes('/search/');
+
+      if (isValid) {
+        validCount++;
+      } else {
+        invalidCount++;
+        if (invalidSamples.length < 5) {
+          invalidSamples.push({ title: r.get('Title') || 'Untitled', url });
+        }
+      }
+    });
+
+
+    res.json({
+      total:   records.length,
+      valid:   validCount,
+      invalid: invalidCount,
+      invalidPercentage: `${((invalidCount / (records.length || 1)) * 100).toFixed(1)}%`,
+      samples: invalidSamples,
+    });
+  } catch (err) {
+    console.error('[VerifyURLs] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/resume-leads/purge-all-demo & POST /api/resume-leads/purge-demo-data
+const handlePurgeAllDemo = async (req, res) => {
+  if (!['admin', 'pm'].includes(req.user?.role)) {
+    return res.status(403).json({ error: 'Admin only' });
+  }
+
+  const base = getBase();
+  if (!base) return res.status(500).json({ error: 'Airtable not configured' });
+
+  try {
+    const allRecords = await base('ResumeLeads').select().all();
+
+    const demoRecords = allRecords.filter(r => {
+      const desc  = (r.get('Description') || '').toLowerCase();
+      const url   = (r.get('CraigslistURL') || '').toLowerCase();
+      const title = (r.get('Title') || '').toLowerCase();
+      const agent = (r.get('AssignedTo') || '').toLowerCase();
+
+      return (
+        // Specific demo descriptions to remove
+        desc.includes('energetic sales professional based in') ||
+        desc.includes('proven track record in outbound phone outreach and merchant communication') ||
+        desc.includes('seeking cold calling, b2b sales, or appointment setting position') ||
+        desc.includes('connecticut / hartford seeking cold calling') ||
+        desc.includes('orlando, fl seeking cold calling') ||
+        // Fake email domain / URLs
+        desc.includes('waveclosers-candidate.com') ||
+        url.includes('waveclosers-candidate.com') ||
+        url.includes('waveclosers.com') ||
+        url.includes('example.com') ||
+        url === '' ||
+        (!url.startsWith('https://') && url !== '') ||
+        // Search page URLs that are not actual posts
+        url.includes('/search/res') ||
+        // Invalid URLs that would 404
+        (!url.includes('/res/') && !url.includes('/view/d/') && url.includes('craigslist.org')) ||
+
+        // Placeholder agents
+        agent.includes('agent 1') || agent.includes('agent 2') || agent.includes('agent 3') ||
+        agent.includes('agent 4') || agent.includes('agent 5') || agent.includes('agent 6')
+      );
+    });
+
+    console.log(`[Purge] Found ${demoRecords.length} demo/invalid records out of ${allRecords.length} total`);
+
+    if (demoRecords.length === 0) {
+      return res.json({ success: true, deleted: 0, message: 'No demo data found — already clean' });
+    }
+
+    // Delete in batches of 10
+    const ids = demoRecords.map(r => r.id);
+    for (let i = 0; i < ids.length; i += 10) {
+      await base('ResumeLeads').destroy(ids.slice(i, i + 10));
+      console.log(`[Purge] Deleted batch ${Math.floor(i/10) + 1}/${Math.ceil(ids.length/10)}`);
+    }
+
+    // Also clean dedup registry of fake entries
+    const dedupRecords = await base('ResumeDeduplicationRegistry').select().all();
+    const fakeDedups = dedupRecords.filter(r => {
+      const url = (r.get('CraigslistURL') || '').toLowerCase();
+      return (
+        url === '' ||
+        url.includes('waveclosers') ||
+        url.includes('example.com') ||
+        (!url.startsWith('https://') && url !== '') ||
+        url.includes('/search/res')
+      );
+    });
+
+    if (fakeDedups.length > 0) {
+      const dedupIds = fakeDedups.map(r => r.id);
+      for (let i = 0; i < dedupIds.length; i += 10) {
+        await base('ResumeDeduplicationRegistry').destroy(dedupIds.slice(i, i + 10));
+      }
+    }
+
+    res.json({
+      success:      true,
+      deleted:      ids.length,
+      dedupCleaned: fakeDedups.length,
+      message:      `✓ Deleted ${ids.length} demo/invalid leads and cleaned ${fakeDedups.length} dedup entries. Agents will only see real leads now.`,
+    });
+
+  } catch (err) {
+    console.error('[Purge] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+app.post('/api/resume-leads/purge-all-demo', requireAuth, handlePurgeAllDemo);
+app.post('/api/resume-leads/purge-demo-data', requireAuth, handlePurgeAllDemo);
+
 
 
 

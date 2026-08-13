@@ -36,12 +36,14 @@ import {
   // Resume Lead Distribution (Workflow C)
   getRecruitingAgents,
   getGlobalResumeDeduplicationSet,
+  normalizeResumeURL,
   bulkAssignResumeLeads,
   saveResumeLead,
   registerResumeAsAssigned,
   // Notifications (Req 4)
   createNotification,
 } from './airtableClient.js';
+
 import {
   sendEmail,
   buildWelcomeEmail,
@@ -709,6 +711,53 @@ if (!TEST_MODE) {
 
 // ─── Resume Lead Distribution ─────────────────────────────────────────────────
 
+const DEMO_DESCRIPTION_PHRASES = [
+  'energetic sales professional based in',
+  'proven track record in outbound phone outreach and merchant communication',
+  'seeking cold calling, b2b sales, or appointment setting position',
+  'connecticut / hartford seeking cold calling',
+  'orlando, fl seeking cold calling',
+  'waveclosers-candidate.com',
+  'waveclosers.com',
+  'example.com',
+];
+
+export function isDemoLead(lead) {
+  const desc  = (lead.description || '').toLowerCase();
+  const rawUrl = (lead.link || lead.craigslistUrl || lead.url || '').trim();
+  const url   = normalizeResumeURL(rawUrl);
+  const title = (lead.title || '').toLowerCase();
+
+  // Check for known demo phrases in description
+  if (DEMO_DESCRIPTION_PHRASES.some(phrase => desc.includes(phrase))) {
+    return true;
+  }
+
+  // Check for fake URLs
+  if (!url.startsWith('https://') || url === '') return true;
+  if (!url.includes('craigslist.org')) return true;
+  if (!url.includes('/res/') && !url.includes('/view/d/')) return true;
+  if (url.includes('/search/')) return true; // search page not post
+
+
+  return false;
+}
+
+async function startupChecks() {
+  try {
+    const dedupeSet = await getGlobalResumeDeduplicationSet();
+    console.log(`[Worker] Startup: ${dedupeSet.size} URLs in dedup registry`);
+
+    if (dedupeSet.size === 0) {
+      console.warn('[Worker] ⚠ Dedup registry is EMPTY — this may cause duplicates on first run');
+      console.warn('[Worker] ⚠ Verify ResumeDeduplicationRegistry table exists in Airtable');
+    }
+  } catch (err) {
+    console.error('[Worker] Startup check error:', err.message);
+  }
+}
+startupChecks();
+
 export async function distributeResumeLeads() {
   const today = new Date().toISOString().split('T')[0];
 
@@ -747,10 +796,15 @@ export async function distributeResumeLeads() {
         console.log(`[Worker] Fetching resumes for ${market.label} (${market.slug}) kw="${kw}"...`);
         const results = await fetchCraigslistResumesWithFallback(market.slug, kw, 30);
 
-        // Filter against dedup set immediately
+        // Filter against dedup set & demo lead check immediately
         const fresh = results.filter(r => {
-          const url = (r.link || '').trim().toLowerCase();
-          return url && !globalDedupeSet.has(url);
+          const url = normalizeResumeURL(r.link || '');
+          if (!url || globalDedupeSet.has(url)) return false;
+          if (isDemoLead(r)) {
+            console.warn(`[Worker] Blocked demo/invalid lead: "${r.title}" — ${r.link}`);
+            return false;
+          }
+          return true;
         });
 
         console.log(`[Worker] ${market.label} ("${kw}"): ${results.length} fetched → ${fresh.length} fresh`);
@@ -761,12 +815,21 @@ export async function distributeResumeLeads() {
     }
   }
 
+  // Filter out any demo leads across entire collection
+  allFreshResumes = allFreshResumes.filter(r => {
+    if (isDemoLead(r)) {
+      console.warn(`[Worker] Blocked demo/invalid lead: "${r.title}" — ${r.link}`);
+      return false;
+    }
+    return true;
+  });
 
+  console.log(`[Worker] After demo filter: ${allFreshResumes.length} valid real leads`);
 
-  // Remove duplicates within this batch itself by URL
+  // Remove duplicates within this batch itself by normalized URL
   const seen = new Set();
   allFreshResumes = allFreshResumes.filter(r => {
-    const url = (r.link || '').trim().toLowerCase();
+    const url = normalizeResumeURL(r.link || '');
     if (!url || seen.has(url)) return false;
     seen.add(url);
     return true;
@@ -787,7 +850,6 @@ export async function distributeResumeLeads() {
   if (allFreshResumes.length < needed) {
     console.warn(`[Worker] Only ${allFreshResumes.length} fresh resumes — need ${needed} for ${agents.length} agents`);
   }
-
 
   // ROUND-ROBIN distribution — not sequential batching
   // This ensures all agents get some leads even if pool is small
@@ -819,14 +881,20 @@ export async function distributeResumeLeads() {
     }
 
     for (const resume of batch) {
-      const url = (resume.link || '').trim().toLowerCase();
+      const rawUrl = (resume.link || '').trim();
+      const normalizedUrl = normalizeResumeURL(rawUrl);
+
+      if (isDemoLead({ ...resume, link: rawUrl })) {
+        console.warn(`[Worker] Blocked demo lead during save: ${resume.title}`);
+        continue;
+      }
 
       // Save real resume to ResumeLeads table
       await saveResumeLead({
         title:         resume.title,
         description:   resume.description,
         phone:         resume.phone || '',
-        craigslistUrl: url,
+        craigslistUrl: rawUrl,
         market:        resume.market,
         assignedTo:    agent.name,
         assignedDate:  today,
@@ -835,10 +903,10 @@ export async function distributeResumeLeads() {
       });
 
       // Lock in dedup registry IMMEDIATELY
-      await registerResumeAsAssigned(url, agent.name, today);
+      await registerResumeAsAssigned(normalizedUrl, agent.name, today);
 
       // Add to in-memory set to prevent cross-agent duplicates in this run
-      globalDedupeSet.add(url);
+      globalDedupeSet.add(normalizedUrl);
     }
 
     await appendLog({
@@ -852,6 +920,7 @@ export async function distributeResumeLeads() {
 
   console.log('[Worker] Daily resume distribution complete — ALL REAL DATA from Apify');
 }
+
 
 
 // ─── Test mode ────────────────────────────────────────────────────────────────

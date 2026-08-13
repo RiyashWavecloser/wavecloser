@@ -327,9 +327,28 @@ export default function ResumeLeadsTab({ currentUser }) {
                         <div style={S.contactRow}>
                           {lead.phone && <a href={`tel:${lead.phone}`} style={S.phoneLink}>📞 {lead.phone}</a>}
                           {lead.email && <a href={`mailto:${lead.email}`} style={S.emailLink}>✉️ {lead.email}</a>}
-                          {lead.craigslistUrl && (
-                            <a href={lead.craigslistUrl} target="_blank" rel="noopener noreferrer" style={S.clLink}>🔗 View Post</a>
-                          )}
+                          {(() => {
+                            const url = (lead.craigslistUrl || lead.url || lead.link || '').trim();
+                            const hasValidUrl = url &&
+                              url.includes('craigslist.org') &&
+                              (url.includes('/res/') || url.includes('/view/d/')) &&
+                              !url.includes('/search/');
+                            return hasValidUrl ? (
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={S.clLink}
+                                onClick={() => console.log('[Agent] Viewing post:', url)}
+                              >
+                                🔗 View Post ↗
+                              </a>
+                            ) : (
+                              <span style={{ fontSize: 11, color: '#AAA' }}>Link unavailable</span>
+                            );
+                          })()}
+
+
                         </div>
                         {lead.description && <div style={S.description}>{lead.description}</div>}
                         <div style={S.actionRow}>

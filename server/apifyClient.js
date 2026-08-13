@@ -55,8 +55,15 @@ export async function fetchViaApify(citySlug, keywords, limit = 100) {
 
   const results = data
     .filter(item => {
-      // Must have a real URL
-      if (!item.url && !item.link) return false;
+      const url = (item.url || item.link || '').trim();
+      if (!url) {
+        console.warn('[Apify] Item has no URL — skipping');
+        return false;
+      }
+      if (!url.includes('craigslist.org')) {
+        console.warn(`[Apify] Not a Craigslist URL: ${url} — skipping`);
+        return false;
+      }
       // Filter old posts
       if (item.time || item.date) {
         const postDate = new Date(item.time || item.date);
@@ -64,20 +71,34 @@ export async function fetchViaApify(citySlug, keywords, limit = 100) {
       }
       return true;
     })
-    .map(item => ({
-      title:       (item.title || 'Resume Post').trim(),
-      description: (item.postingBody || item.description || item.body || '')
-                   .replace(/<[^>]+>/g, '').trim().slice(0, 500),
-      phone:       extractPhone(item.postingBody || item.description || item.body || ''),
-      link:        (item.url || item.link || '').trim(),
-      date:        item.time || item.date || new Date().toISOString(),
-      source:      'apify',
-    }))
-    .filter(item => item.link && !item.link.includes('waveclosers.com')); // safety check — never fake data
+    .map(item => {
+      let url = (item.url || item.link || '').trim();
 
-  console.log(`[Apify] Valid results after filtering: ${results.length}`);
+      // Fix common URL format issues from Apify
+      // Sometimes Apify returns search page URL instead of post URL
+      // Real post URL format: https://city.craigslist.org/xxx/res/1234567890.html
+      // Bad URL format: https://city.craigslist.org/search/res?query=sales
+      if (url.includes('/search/')) {
+        console.warn(`[Apify] Got search URL instead of post URL: ${url} — skipping`);
+        return null;
+      }
+
+      return {
+        title:       (item.title || 'Resume Post').trim(),
+        description: (item.postingBody || item.description || item.body || '')
+                     .replace(/<[^>]+>/g, '').trim().slice(0, 500),
+        phone:       extractPhone(item.postingBody || item.description || item.body || ''),
+        link:        url,
+        date:        item.time || item.date || new Date().toISOString(),
+        source:      'apify',
+      };
+    })
+    .filter(item => item !== null && item.link && !item.link.includes('waveclosers.com'));
+
+  console.log(`[Apify] ${results.length} valid post URLs after filtering`);
   return results;
 }
+
 
 /**
  * Fetch resumes from Craigslist's internal SAPI (JSON).
@@ -113,18 +134,25 @@ export async function fetchViaCLSAPI(citySlug, keywords, limit = 50) {
   const results = rawItems
     .filter(item => Array.isArray(item) && item.length >= 9)
     .map(item => {
-      const title    = String(item[8] || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').trim();
-      const pathSlug = Array.isArray(item[7]) ? item[7][1] : String(item[7] || '');
-      const postingId = item[0];
-      const link     = `https://${citySlug}.craigslist.org/res/${pathSlug}-${postingId}.html`;
-      return { title, link, postingId, description: '', phone: '', email: '', date: '', source: 'cl-sapi', market: citySlug };
+      const title       = String(item[8] || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').trim();
+      const pathSlug    = Array.isArray(item[7]) ? item[7][1] : String(item[7] || '');
+      const postingHash = Array.isArray(item[6]) ? item[6][1] : String(item[6] || item[0] || '');
+
+      // Real Craigslist post URL format: https://www.craigslist.org/view/d/{slug}/{hash}
+      // Or fallback if pathSlug/postingHash missing
+      const link = (pathSlug && postingHash)
+        ? `https://www.craigslist.org/view/d/${pathSlug}/${postingHash}`
+        : `https://${citySlug}.craigslist.org/search/res`;
+
+      return { title, link, postingId: postingHash, description: '', phone: '', email: '', date: '', source: 'cl-sapi', market: citySlug };
     })
-    .filter(item => item.title && item.link && !item.link.includes('waveclosers.com'))
+    .filter(item => item.title && item.link && !item.link.includes('waveclosers.com') && !item.link.includes('/search/'))
     .slice(0, limit);
 
   console.log(`[CL-SAPI] ${rawItems.length} raw items → ${results.length} usable resumes for ${citySlug}`);
   return results;
 }
+
 
 
 export async function fetchViaRSS(citySlug, keywords, limit) {
