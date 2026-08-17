@@ -718,7 +718,10 @@ export function isDemoLead(lead) {
   if (!url.startsWith('https://')) return true;
   if (!url.includes('craigslist.org')) return true;
   if (url.includes('/search/res')) return true; // search page not post
-  if (!url.includes('.html')) return true; // post URLs always end in .html
+
+  // Valid Craigslist posting URLs can be /view/d/..., /d/..., or .html
+  const isPostUrl = url.includes('/view/d/') || url.includes('/d/') || url.includes('.html');
+  if (!isPostUrl) return true;
 
   // Check for fake domain in URL
   if (DEMO_PHRASES.some(phrase => url.includes(phrase))) return true;
