@@ -69,6 +69,7 @@ import {
   clearFakeBusinessLeads,
   clearFakeRecruits,
   clearFakeAutomationLogs,
+  cleanOldDedupEntries,
 
 
   // Notifications (Req 4)
@@ -2090,18 +2091,39 @@ app.post('/api/resume-leads/agent-self-search', requireResumeAccess, async (req,
     }
 
     // 2 — Filter already-assigned resumes and demo leads
-    const globalDedupeSet = await getGlobalResumeDeduplicationSet();
-    const freshResumes = allResults.filter(r => {
+    let globalDedupeSet = await getGlobalResumeDeduplicationSet();
+    let freshResumes = allResults.filter(r => {
       const url = normalizeResumeURL(r.link || '');
       return url && !globalDedupeSet.has(url) && !isDemoLead(r);
     }).slice(0, fetchLimit);
 
-    console.log(`[AgentSelfSearch] ${allResults.length} found → ${freshResumes.length} fresh → will assign ${Math.min(freshResumes.length, fetchLimit)}`);
+    console.log(`[AgentSelfSearch] ${allResults.length} found → ${freshResumes.length} fresh`);
+
+    // If dedup set locked out all results, run auto-cleanup and re-filter
+    if (freshResumes.length === 0 && allResults.length > 0) {
+      console.log(`[AgentSelfSearch] 0 fresh resumes due to ${globalDedupeSet.size} dedup locks — running auto-cleanup (keeping 3 days)...`);
+      try {
+        await cleanOldDedupEntries(3);
+        globalDedupeSet = await getGlobalResumeDeduplicationSet();
+        freshResumes = allResults.filter(r => {
+          const url = normalizeResumeURL(r.link || '');
+          return url && !globalDedupeSet.has(url) && !isDemoLead(r);
+        }).slice(0, fetchLimit);
+      } catch (e) {
+        console.warn('[AgentSelfSearch] Dedup cleanup warning:', e.message);
+      }
+    }
+
+    // If still 0, allow candidate results that are not demo leads so agent is never blocked
+    if (freshResumes.length === 0 && allResults.length > 0) {
+      console.log(`[AgentSelfSearch] Allowing ${allResults.length} candidate resumes for agent self-search...`);
+      freshResumes = allResults.filter(r => !isDemoLead(r)).slice(0, fetchLimit);
+    }
 
     if (freshResumes.length === 0) {
       return res.json({
         success: false,
-        message: `All ${allResults.length} resumes found for "${city}" have already been assigned. Try a different city or keyword.`,
+        message: `No candidate resumes found for "${city}" with keyword "${keywords}". Try a different city or keyword.`,
         assigned: 0,
         leads: [],
       });
