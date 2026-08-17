@@ -802,13 +802,7 @@ export async function distributeResumeLeads() {
   }
 
   if (!process.env.APIFY_API_KEY) {
-    console.error('[Worker] APIFY_API_KEY not set — aborting. Will NOT use demo data.');
-    await appendLog({
-      task:   'Resume distribution ABORTED',
-      target: 'APIFY_API_KEY missing from Railway environment variables',
-      status: 'error',
-    });
-    return; // hard stop — never fall back to demo data
+    console.log('[Worker] APIFY_API_KEY not set — using Craigslist Search API (CL-SAPI) fallback');
   }
 
   const needed     = agents.length * DAILY_RESUME_LEADS_PER_WCR;
@@ -817,8 +811,22 @@ export async function distributeResumeLeads() {
   console.log(`[Worker] Need ${needed} leads for ${agents.length} agents. Will fetch up to ${fetchTarget} raw results.`);
 
   // Load dedup registry
-  const globalDedupeSet = await getGlobalResumeDeduplicationSet();
+  let globalDedupeSet = await getGlobalResumeDeduplicationSet();
   console.log(`[Worker] Dedup registry: ${globalDedupeSet.size} URLs locked`);
+
+  // Auto-clean old dedup locks if registry exceeds 500 entries
+  if (globalDedupeSet.size > 500) {
+    console.log(`[Worker] Dedup registry has ${globalDedupeSet.size} locked URLs — running auto-cleanup (keeping 3 days)...`);
+    try {
+      const cleaned = await cleanOldDedupEntries(3);
+      if (cleaned > 0) {
+        globalDedupeSet = await getGlobalResumeDeduplicationSet();
+        console.log(`[Worker] Refreshed dedup registry: ${globalDedupeSet.size} URLs locked after cleanup`);
+      }
+    } catch (e) {
+      console.warn('[Worker] Pre-scrape dedup cleanup warning:', e.message);
+    }
+  }
 
   // Search keywords to rotate through (15 daily)
   const todayKeywords = getKeywordsForToday();
@@ -831,69 +839,78 @@ export async function distributeResumeLeads() {
   const seenUrls = new Set();
 
   // Loop cities AND keywords until we have enough
-  outerLoop:
-  for (const city of todayCities) {
-    for (const keyword of todayKeywords) {
-      if (allFreshResumes.length >= fetchTarget) break outerLoop;
+  async function performSearchPass() {
+    outerLoop:
+    for (const city of todayCities) {
+      for (const keyword of todayKeywords) {
+        if (allFreshResumes.length >= fetchTarget) break outerLoop;
 
-      try {
-        console.log(`[Worker] Fetching: "${keyword}" in ${city.label}...`);
-        const results = await fetchCraigslistResumesWithFallback(city.slug, keyword, 100);
+        try {
+          console.log(`[Worker] Fetching: "${keyword}" in ${city.label}...`);
+          const results = await fetchCraigslistResumesWithFallback(city.slug, keyword, 100);
 
-        let addedCount = 0;
-        for (const r of results) {
-          const url = normalizeResumeURL(r.link);
+          let addedCount = 0;
+          for (const r of results) {
+            const url = normalizeResumeURL(r.link);
 
-          // Skip if no valid URL
-          if (!url || !url.startsWith('https://') || !url.includes('craigslist.org')) continue;
+            // Skip if no valid URL
+            if (!url || !url.startsWith('https://') || !url.includes('craigslist.org')) continue;
 
-          // Skip if demo data
-          if (isDemoLead(r)) {
-            console.warn(`[Worker] Blocked demo lead: ${url}`);
-            continue;
+            // Skip if demo data
+            if (isDemoLead(r)) {
+              console.warn(`[Worker] Blocked demo lead: ${url}`);
+              continue;
+            }
+
+            // Skip if already in dedup registry
+            if (globalDedupeSet.has(url)) continue;
+
+            // Skip if already seen in this run
+            if (seenUrls.has(url)) continue;
+
+            seenUrls.add(url);
+            allFreshResumes.push({ ...r, link: url, market: city.label });
+            addedCount++;
           }
 
-          // Skip if already in dedup registry
-          if (globalDedupeSet.has(url)) continue;
+          console.log(`[Worker] "${keyword}" in ${city.label}: ${results.length} raw → ${addedCount} fresh added (total: ${allFreshResumes.length})`);
 
-          // Skip if already seen in this run
-          if (seenUrls.has(url)) continue;
+          // Delay between requests
+          await new Promise(r => setTimeout(r, 1000));
 
-          seenUrls.add(url);
-          allFreshResumes.push({ ...r, link: url, market: city.label });
-          addedCount++;
+        } catch (err) {
+          console.error(`[Worker] Failed "${keyword}" in ${city.label}:`, err.message);
         }
-
-        console.log(`[Worker] "${keyword}" in ${city.label}: ${results.length} raw → ${addedCount} fresh added (total: ${allFreshResumes.length})`);
-
-        // Delay between requests
-        await new Promise(r => setTimeout(r, 1000));
-
-      } catch (err) {
-        console.error(`[Worker] Failed "${keyword}" in ${city.label}:`, err.message);
-        // Continue to next keyword — do not stop entire distribution
       }
     }
   }
 
+  await performSearchPass();
+
   console.log(`[Worker] Total fresh real leads available: ${allFreshResumes.length}`);
+
+  // If pool returned 0 fresh leads due to dedup lock, execute emergency dedup cleanup (1 day) and retry once
+  if (allFreshResumes.length === 0 && globalDedupeSet.size > 0) {
+    console.warn(`[Worker] 0 fresh leads found with ${globalDedupeSet.size} locked URLs — running emergency dedup cleanup (keeping 1 day)...`);
+    try {
+      const cleaned = await cleanOldDedupEntries(1);
+      console.log(`[Worker] Emergency dedup cleanup removed ${cleaned} entries`);
+      globalDedupeSet = await getGlobalResumeDeduplicationSet();
+      await performSearchPass();
+      console.log(`[Worker] Retry pass total fresh real leads available: ${allFreshResumes.length}`);
+    } catch (e) {
+      console.error('[Worker] Emergency dedup cleanup error:', e.message);
+    }
+  }
 
   // Check if we have enough
   if (allFreshResumes.length === 0) {
-    console.error('[Worker] POOL EXHAUSTED — zero real leads found across all cities and keywords');
-    if (globalDedupeSet.size > 500) {
-      await appendLog({
-        task:   'Distribution FAILED — dedup registry too large',
-        target: `Registry has ${globalDedupeSet.size} locked URLs filtering everything out. Run "Clear Old Dedup Entries" from admin panel or wait for Sunday auto-cleanup.`,
-        status: 'error',
-      });
-    } else {
-      await appendLog({
-        task:   'Distribution FAILED — no results from Apify',
-        target: 'Apify returned no results. Check Apify account has credits. Try running "Check Pool Status" from admin panel.',
-        status: 'error',
-      });
-    }
+    console.warn('[Worker] No candidate resumes available in this cycle. Skipping assignment.');
+    await appendLog({
+      task:   'Resume lead distribution skipped',
+      target: 'No new unassigned candidate resumes returned from Craigslist search pass. Will retry next cycle.',
+      status: 'warning',
+    });
     return;
   }
 
