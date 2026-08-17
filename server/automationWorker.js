@@ -26,10 +26,25 @@ import {
   updateUser,
   appendLog,
   getLeads,
+
+  getBase,
   getUnassignedLeads,
   assignLeadsToAgent,
+  assignLeadToAgent,
   getMondayOfCurrentWeek,
+  listAgents,
+  isRealAgentName,
+  // Resume Lead Distribution (Workflow C)
+  getRecruitingAgents,
+  getGlobalResumeDeduplicationSet,
+  bulkAssignResumeLeads,
+  saveResumeLead,
+  registerResumeAsAssigned,
+  cleanOldDedupEntries,
+  // Notifications (Req 4)
+  createNotification,
 } from './airtableClient.js';
+
 import {
   sendEmail,
   buildWelcomeEmail,
@@ -40,20 +55,58 @@ import {
   buildLearningEnrollmentEmail,
   buildTrainingInviteEmail,
 } from './emailService.js';
-import { BENCHMARKS, WEEKLY_LEADS_PER_AGENT, LEAD_GENERATION_MARKETS, NUM_AGENTS, AGENTS } from './constants.js';
+import {
+  BENCHMARKS,
+  WEEKLY_LEADS_PER_AGENT,
+  NUM_AGENTS,
+  AGENTS,
+  DAILY_RESUME_LEADS_PER_WCR,
+  RESUME_SEARCH_KEYWORDS,
+  RESUME_SEARCH_KEYWORDS_LIST,
+  ALL_USA_CRAIGSLIST_CITIES,
+  ALL_USA_BUSINESS_MARKETS,
+  HIGH_VOLUME_CITIES,
+  normalizeResumeURL,
+  isDemoLead,
+} from './constants.js';
 import { generateLeads } from './leadWorker.js';
+import { fetchViaApify, fetchCraigslistResumesWithFallback } from './apifyClient.js';
+
 
 dotenv.config();
 
-const TEST_MODE   = process.argv.includes('--test-mode');
-const CLAUDE_KEY  = process.env.ANTHROPIC_API_KEY;
+const TEST_MODE    = process.argv.includes('--test-mode');
+const CLAUDE_KEY   = process.env.ANTHROPIC_API_KEY;
+const APIFY_KEY    = process.env.APIFY_API_KEY;
 const RESEND_READY = !!process.env.RESEND_API_KEY;
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
 
+function verifyProductionConfig() {
+  const required = {
+    APIFY_API_KEY:      process.env.APIFY_API_KEY,
+    AIRTABLE_API_KEY:   process.env.AIRTABLE_API_KEY,
+    AIRTABLE_BASE_ID:   process.env.AIRTABLE_BASE_ID,
+  };
+
+  const missing = Object.entries(required)
+    .filter(([key, val]) => !val)
+    .map(([key]) => key);
+
+  if (missing.length > 0) {
+    console.error('[Worker] ⚠ MISSING ENVIRONMENT VARIABLES:', missing.join(', '));
+    console.error('[Worker] Auto-distribution will use demo data or fail until these are set in Railway');
+  } else {
+    console.log('[Worker] ✓ All environment variables configured — will use real Apify data');
+  }
+}
+
+verifyProductionConfig();
+
 const now = new Date().toLocaleString();
 console.log(`\n[Wave Closers Worker] Started — ${now}`);
 console.log(`  Airtable: ${airtableReady() ? '✓' : '✗ (demo mode)'}  Email: ${RESEND_READY ? '✓' : '✗ (console)'}  Claude: ${CLAUDE_KEY ? '✓' : '✗ (demo)'}`);
+
 if (!TEST_MODE) console.log('  Polling every 60s | Report: Mon 7am | Quota check: last day of month 9am\n');
 
 // ─── Idempotency ──────────────────────────────────────────────────────────────
@@ -260,37 +313,33 @@ async function poll() {
 
 // ─── Weekly Lead Model Helpers ────────────────────────────────────────────────
 
-// Helper to generate synthetic demo leads when Airtable/APIs are in demo mode
-function generateManyDemoLeads(count, location = 'Nashville, TN') {
-  const types = ['restaurant', 'beauty_salon', 'nail_salon', 'deli', 'massage', 'small_retail'];
-  const names = ['Kitchen', 'Palace', 'Corner', 'Express', 'Studio', 'Lounge', 'Lab', 'Elite', 'Bar', 'Market', 'Touch', 'Gift Shop', 'Boutique'];
-  const prefixes = ['Luxe', 'Grand', 'Zen', 'Urban', 'Metro', 'Royal', 'Lively', 'Happy', 'Golden', 'Star', 'First', 'Next'];
-  
-  const leads = [];
-  for (let i = 1; i <= count; i++) {
-    const type = types[i % types.length];
-    const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-    const name = names[Math.floor(Math.random() * names.length)];
-    const bName = `${prefix} ${type.replace('_', ' ')} ${name}`;
-    leads.push({
-      placeId: `demo-gen-${i}-${Date.now()}`,
-      businessName: bName,
-      type,
-      address: `${100 + i} Main St, ${location}`,
-      phone: `(555) 555-${String(1000 + i).slice(-4)}`,
-      website: i % 3 === 0 ? `https://demo-${i}.com` : '',
-      rating: +(3.5 + Math.random() * 1.5).toFixed(1),
-      reviewCount: Math.floor(20 + Math.random() * 500),
-      score: Math.floor(40 + Math.random() * 55),
-      scoreReason: 'Demo lead — connect API keys for real scoring.',
-      status: 'New',
-      assignedAgent: '',
-      calledAt: null,
-      outcome: '',
-      market: location,
-    });
+/**
+ * Returns today's rotating batch of 20 Craigslist cities from the full USA list.
+ * Cycles through all ~300 cities over time so different cities are searched each day.
+ * This prevents shortfalls by ensuring the pool is always fresh and geographically diverse.
+ */
+function getCitiesForToday() {
+  // Always include top 5 high-volume cities
+  // Then rotate through the rest
+  const top5    = HIGH_VOLUME_CITIES.slice(0, 5);
+  const rest    = HIGH_VOLUME_CITIES.slice(5);
+  const allMore = ALL_USA_CRAIGSLIST_CITIES.filter(
+    c => !HIGH_VOLUME_CITIES.find(h => h.slug === c.slug)
+  );
+
+  const dayOfYear  = Math.floor((new Date() - new Date(new Date().getFullYear(), 0, 0)) / 86400000);
+  const batchSize  = 15;
+  const startIndex = (dayOfYear * batchSize) % (rest.length + allMore.length);
+  const rotation   = [...rest, ...allMore];
+  const todayExtra = [];
+
+  for (let i = 0; i < batchSize; i++) {
+    todayExtra.push(rotation[(startIndex + i) % rotation.length]);
   }
-  return leads;
+
+  const todayCities = [...top5, ...todayExtra];
+  console.log(`[Worker] Today's ${todayCities.length} cities: ${todayCities.map(c => c.label).join(', ')}`);
+  return todayCities;
 }
 
 // Friday 5pm Weekly Lead Performance Report
@@ -385,9 +434,169 @@ async function generateWeeklyLeadReport() {
   }
 }
 
-// ─── Cron jobs ────────────────────────────────────────────────────────────────
+// ─── Daily Lead Distribution (Req 3) ─────────────────────────────────────────
+
+/**
+ * Distribute fresh leads to all cold-calling agents using round-robin.
+ * Called by the morning cron (8AM EST) and midday cron (12PM EST).
+ * @param {'morning'|'midday'} session
+ */
+export async function distributeDailyLeads(session = 'morning') {
+  if (!airtableReady()) {
+    console.log('[Worker] Airtable not configured — skipping daily lead distribution');
+    return;
+  }
+
+  const today      = new Date().toISOString().split('T')[0];
+  const perAgent   = session === 'morning'
+    ? parseInt(process.env.MORNING_LEADS_PER_AGENT) || 60
+    : parseInt(process.env.MIDDAY_LEADS_PER_AGENT)  || 40;
+
+  // Get all cold-calling agents (from Airtable Staff table or AGENTS fallback)
+  // Filters out generic placeholder accounts like "Agent 1", "Agent 2"
+  const agentsList = await listAgents().catch(() => AGENTS);
+  const coldCallers = agentsList.filter(a =>
+    a.name && isRealAgentName(a.name) &&
+    (!a.role || a.role.includes('cold') || a.role.includes('rep') || a.role.includes('reseller') || a.role.includes('agent'))
+  );
+  const effectiveCallers = coldCallers.length ? coldCallers : AGENTS.filter(a => isRealAgentName(a.name));
+
+  console.log(`[Worker] ${session}: distributing ${perAgent} leads to ${effectiveCallers.length} real agents`);
+
+  // Get unassigned leads from Leads table
+  const needed     = effectiveCallers.length * perAgent;
+  let unassigned   = await getUnassignedLeads(needed * 2);
+
+  // Auto-generation fallback: if unassigned leads in DB are insufficient, generate fresh ones across USA markets!
+  if (unassigned.length < needed) {
+    console.log(`[Worker] ${session}: Only ${unassigned.length} unassigned leads in DB (need ${needed}). Triggering USA-wide auto-lead generation...`);
+    const envMarkets = process.env.LEAD_GENERATION_MARKETS ? process.env.LEAD_GENERATION_MARKETS.split(',').map(m => m.trim()).filter(Boolean) : null;
+    const targetMarkets = envMarkets || ALL_USA_BUSINESS_MARKETS;
+    const businessTypes = ['restaurant', 'beauty_salon', 'nail_salon', 'deli', 'massage', 'small_retail', 'auto_repair', 'contractor', 'dentist', 'real_estate_agency'];
+
+    // Rotate/shuffle markets so different runs target different nationwide US cities
+    const shuffledMarkets = [...targetMarkets].sort(() => Math.random() - 0.5);
+
+    for (const market of shuffledMarkets) {
+      if (unassigned.length >= needed * 1.5) break;
+      try {
+        console.log(`[Worker] Auto-generating fresh leads for USA market: ${market}...`);
+        await generateLeads({ location: market, businessTypes, radius: 10, maxLeads: 100 });
+        unassigned = await getUnassignedLeads(needed * 2);
+      } catch (err) {
+        console.error(`[Worker] Auto-generation failed for ${market}:`, err.message);
+      }
+    }
+  }
+
+  if (!unassigned.length) {
+    await appendLog({
+      task:   `${session} distribution — no leads available`,
+      target: 'All markets — Lead Generation APIs returned 0 leads',
+      status: 'alert',
+    }).catch(() => {});
+    console.warn(`[Worker] ${session}: no unassigned leads available even after generation`);
+    return;
+  }
+
+
+  console.log(`[Worker] ${session}: ${unassigned.length} unassigned leads available for distribution`);
+
+  // Round-robin distribution
+  const buckets = {};
+  effectiveCallers.forEach(a => { buckets[a.name] = []; });
+  let pool = [...unassigned];
+  let idx  = 0;
+
+  while (pool.length > 0) {
+    const agent = effectiveCallers[idx % effectiveCallers.length];
+    if (buckets[agent.name].length < perAgent) {
+      buckets[agent.name].push(pool.shift());
+    }
+    idx++;
+    if (effectiveCallers.every(a => buckets[a.name].length >= perAgent)) break;
+  }
+
+  // Save assignments + create in-app notifications
+  for (const agent of effectiveCallers) {
+    const batch = buckets[agent.name];
+    if (!batch.length) continue;
+
+    // Assign each lead in Airtable
+    for (const lead of batch) {
+      if (lead._airtableId) {
+        await assignLeadToAgent(lead._airtableId, agent.name).catch(err =>
+          console.error(`[Worker] assignLeadToAgent error for ${agent.name}:`, err.message)
+        );
+      }
+    }
+
+    // Create in-app notification
+    const sessionLabel = session === 'morning' ? 'morning' : 'midday';
+    await createNotification({
+      recipientEmail: agent.email,
+      type:           'new_leads_assigned',
+      title:          `${batch.length} new leads assigned to you`,
+      message:        `Your ${sessionLabel} leads are ready. You have ${batch.length} new businesses to call.`,
+    }).catch(err => console.warn(`[Worker] createNotification error for ${agent.name}:`, err.message));
+
+    // Optional email notification (off by default)
+    if (process.env.NOTIFY_AGENTS_BY_EMAIL === 'true' && agent.email) {
+      const frontendUrl = process.env.FRONTEND_URL || 'https://waveclosers-frontend-production.up.railway.app';
+      await sendEmail({
+        to:      agent.email,
+        subject: `You have ${batch.length} new leads ready — Wave Closers`,
+        text:    `Hi ${agent.name},\n\nYour ${sessionLabel} leads are ready. You have ${batch.length} new businesses to call today.\n\nLog in now: ${frontendUrl}\n\nWave Closers Operations`,
+      }).catch(err => console.warn(`[Worker] Email notify error for ${agent.name}:`, err.message));
+    }
+
+    await appendLog({
+      task:   `${session} leads assigned`,
+      target: `${agent.name} → ${batch.length} leads`,
+      status: 'ok',
+    }).catch(() => {});
+
+    console.log(`[Worker] ${session}: ${agent.name} → ${batch.length} leads assigned`);
+  }
+
+  console.log(`[Worker] ${session} distribution complete — ${today}`);
+}
 
 if (!TEST_MODE) {
+  const SALES_LEADS_PAUSED = process.env.PAUSE_SALES_LEAD_DISTRIBUTION === 'true';
+  if (SALES_LEADS_PAUSED) {
+    console.log('[Worker] ⏸ Sales lead auto-distribution is PAUSED (PAUSE_SALES_LEAD_DISTRIBUTION=true)');
+    console.log('[Worker] Recruiting lead distribution is still running normally');
+  }
+
+  // Morning distribution — 8:00 AM EST (= 1:00 PM UTC)
+  const morningCron = process.env.MORNING_DISTRIBUTION_TIME || '0 13 * * *';
+  cron.schedule(morningCron, async () => {
+    if (process.env.PAUSE_SALES_LEAD_DISTRIBUTION === 'true') {
+      console.log('[Worker] ⏸ Morning sales lead distribution skipped — paused by admin');
+      return;
+    }
+    console.log('[Worker] ⏰ Morning lead distribution...');
+    await distributeDailyLeads('morning').catch(err => {
+      console.error('[Worker] Morning distribution error:', err.message);
+    });
+  });
+  console.log(`[worker] ✓ Morning lead distribution cron scheduled: ${morningCron}`);
+
+  // Midday top-up — 12:00 PM EST (= 5:00 PM UTC)
+  const middayCron = process.env.MIDDAY_DISTRIBUTION_TIME || '0 17 * * *';
+  cron.schedule(middayCron, async () => {
+    if (process.env.PAUSE_SALES_LEAD_DISTRIBUTION === 'true') {
+      console.log('[Worker] ⏸ Midday sales lead distribution skipped — paused by admin');
+      return;
+    }
+    console.log('[Worker] ⏰ Midday lead top-up...');
+    await distributeDailyLeads('midday').catch(err => {
+      console.error('[Worker] Midday distribution error:', err.message);
+    });
+  });
+  console.log(`[worker] ✓ Midday lead distribution cron scheduled: ${middayCron}`);
+
   // Onboarding Weekly Report — Monday 7am
   cron.schedule('0 7 * * 1', async () => {
     console.log('[worker] ⏰ Cron: onboarding weekly report');
@@ -421,23 +630,45 @@ if (!TEST_MODE) {
         // Fetch fresh unassigned leads from Airtable to get their Airtable record IDs (_airtableId)
         generatedPool = await getUnassignedLeads(NUM_AGENTS * WEEKLY_LEADS_PER_AGENT);
       } else {
-        // Demo mode: generate synthetic leads in memory
-        console.log('[worker] [demo] Generating synthetic weekly lead pool...');
-        generatedPool = generateManyDemoLeads(NUM_AGENTS * WEEKLY_LEADS_PER_AGENT);
+        console.log('[worker] Airtable not configured — skipping weekly lead assignment');
+        generatedPool = [];
       }
 
-      console.log(`[worker] Total unassigned leads available: ${generatedPool.length}. Assigning to agents...`);
+
+      // Get all agents dynamically and sort by priority (Resellers first, then Reps, then Cold Callers)
+      let activeAgents = [];
+      if (airtableReady()) {
+        activeAgents = await listAgents().catch(() => []);
+      }
+      if (!activeAgents || !activeAgents.length) {
+        activeAgents = [...AGENTS];
+      }
+
+      const rolePriority = {
+        authorized_reseller: 1,
+        independent_rep: 2,
+        cold_caller: 3,
+        agent: 4,
+      };
+
+      activeAgents.sort((a, b) => {
+        const pA = rolePriority[a.role] || 99;
+        const pB = rolePriority[b.role] || 99;
+        return pA - pB;
+      });
+
+      console.log(`[worker] Total unassigned leads available: ${generatedPool.length}. Assigning to agents in priority order...`);
       
       // Assign WEEKLY_LEADS_PER_AGENT leads to each agent
-      for (let i = 0; i < AGENTS.length; i++) {
-        const agent = AGENTS[i];
+      for (let i = 0; i < activeAgents.length; i++) {
+        const agent = activeAgents[i];
         const agentLeads = generatedPool.slice(i * WEEKLY_LEADS_PER_AGENT, (i + 1) * WEEKLY_LEADS_PER_AGENT);
         
         if (agentLeads.length > 0) {
           if (airtableReady()) {
             await assignLeadsToAgent(agentLeads, agent.name);
           }
-          console.log(`[worker] Assigned ${agentLeads.length} leads to ${agent.name}`);
+          console.log(`[worker] Assigned ${agentLeads.length} leads to ${agent.name} (${agent.role})`);
         }
       }
 
@@ -468,10 +699,292 @@ if (!TEST_MODE) {
     await runQuotaChecks(users).catch(console.error);
   });
 
+  // ─── Resume Distribution Crons ──────────────────────────────────────────────
+  const resumeCron = process.env.PHILIPPINES_SHIFT_UTC || '0 20 * * *';
+  cron.schedule(resumeCron, async () => {
+    console.log('[Worker] ⏰ Shift start resume lead distribution starting...');
+    await distributeResumeLeads().catch(err => {
+      console.error('[Worker] Resume distribution error:', err.message);
+    });
+  });
+
+  // Weekly Sunday midnight — clean old dedup entries
+  cron.schedule('0 0 * * 0', async () => {
+    console.log('[Worker] Weekly dedup cleanup running...');
+    await cleanOldDedupEntries(90).catch(err => {
+      console.error('[Worker] Dedup cleanup error:', err.message);
+    });
+  });
+
+  // Morning resume distribution — 8:00 AM EST (= 1:00 PM UTC)
+  cron.schedule(morningCron, async () => {
+    console.log('[Worker] ⏰ Morning resume lead distribution starting...');
+    await distributeResumeLeads().catch(err => {
+      console.error('[Worker] Morning resume distribution error:', err.message);
+    });
+  });
+
+  // Midday resume distribution — 12:00 PM EST (= 5:00 PM UTC)
+  cron.schedule(middayCron, async () => {
+    console.log('[Worker] ⏰ Midday resume lead distribution starting...');
+    await distributeResumeLeads().catch(err => {
+      console.error('[Worker] Midday resume distribution error:', err.message);
+    });
+  });
+
+  console.log(`[worker] ✓ Resume distribution crons scheduled (Morning, Midday, & Shift ${resumeCron})`);
+  console.log(`[worker]   Cities: ${process.env.RESUME_SEARCH_CITIES || 'newyork,newjersey,miami,houston,dallas,chicago,atlanta'}`);
+
+  // 🚀 Startup distribution catch-up: ensures leads are assigned immediately on server startup/deploy
+  setTimeout(async () => {
+    console.log('[Worker] 🚀 Running startup lead distribution catch-up check...');
+    try {
+      await distributeDailyLeads('morning');
+      await distributeResumeLeads();
+      console.log('[Worker] ✓ Startup distribution catch-up complete.');
+    } catch (err) {
+      console.error('[Worker] Startup distribution catch-up error:', err.message);
+    }
+  }, 4000);
+
   // Poll every 60 seconds
   poll();
   setInterval(poll, 60_000);
 }
+
+// ─── Resume Lead Distribution ─────────────────────────────────────────────────
+
+function getKeywordsForToday() {
+  const allKeywords = RESUME_SEARCH_KEYWORDS;
+  const batchSize   = 15;
+  const dayOfYear   = Math.floor(
+    (new Date() - new Date(new Date().getFullYear(), 0, 0)) / 86400000
+  );
+  const startIndex = (dayOfYear * batchSize) % allKeywords.length;
+  const batch      = [];
+
+  for (let i = 0; i < batchSize; i++) {
+    batch.push(allKeywords[(startIndex + i) % allKeywords.length]);
+  }
+
+  console.log(`[Worker] Today's keywords: ${batch.join(', ')}`);
+  return batch;
+}
+
+async function createAgentNotification(agentEmail, agentName, leadCount, session) {
+  const base = getBase();
+  if (!base) return;
+
+  try {
+    await base('Notifications').create({
+      RecipientEmail: agentEmail,
+      Type:           'new_leads_assigned',
+      Title:          `${leadCount} new resume leads assigned to you`,
+      Message:        `Your ${session === 'morning' ? 'morning' : session === 'midday' ? 'midday' : 'daily'} recruiting leads are ready. You have ${leadCount} new candidate${leadCount !== 1 ? 's' : ''} to contact today. Open your Recruiting Pipeline tab to get started.`,
+      IsRead:         false,
+      CreatedAt:      new Date().toISOString(),
+    });
+    console.log(`[Notification] ✓ Created notification for ${agentName} — ${leadCount} leads`);
+  } catch (err) {
+    console.error(`[Notification] Failed to create for ${agentName}:`, err.message);
+  }
+}
+
+export async function distributeResumeLeads() {
+  const today = new Date().toISOString().split('T')[0];
+
+  // Get all recruiting agents from Staff table (filtering out placeholder Agent 1, Agent 2, etc.)
+  const rawAgents = await getRecruitingAgents();
+  const agents = (rawAgents || []).filter(a => a.name && isRealAgentName(a.name));
+  if (!agents || agents.length === 0) {
+    console.error('[Worker] No recruiting agents found');
+    return;
+  }
+
+  if (!process.env.APIFY_API_KEY) {
+    console.error('[Worker] APIFY_API_KEY not set — aborting. Will NOT use demo data.');
+    await appendLog({
+      task:   'Resume distribution ABORTED',
+      target: 'APIFY_API_KEY missing from Railway environment variables',
+      status: 'error',
+    });
+    return; // hard stop — never fall back to demo data
+  }
+
+  const needed     = agents.length * DAILY_RESUME_LEADS_PER_WCR;
+  const fetchTarget = needed * 10; // fetch 10x buffer to survive dedup filtering
+
+  console.log(`[Worker] Need ${needed} leads for ${agents.length} agents. Will fetch up to ${fetchTarget} raw results.`);
+
+  // Load dedup registry
+  const globalDedupeSet = await getGlobalResumeDeduplicationSet();
+  console.log(`[Worker] Dedup registry: ${globalDedupeSet.size} URLs locked`);
+
+  // Search keywords to rotate through (15 daily)
+  const todayKeywords = getKeywordsForToday();
+
+  // Get today's cities from rotation
+  const todayCities = getCitiesForToday();
+  console.log(`[Worker] Today's cities: ${todayCities.map(c => c.label).join(', ')}`);
+
+  let allFreshResumes = [];
+  const seenUrls = new Set();
+
+  // Loop cities AND keywords until we have enough
+  outerLoop:
+  for (const city of todayCities) {
+    for (const keyword of todayKeywords) {
+      if (allFreshResumes.length >= fetchTarget) break outerLoop;
+
+      try {
+        console.log(`[Worker] Fetching: "${keyword}" in ${city.label}...`);
+        const results = await fetchCraigslistResumesWithFallback(city.slug, keyword, 100);
+
+        let addedCount = 0;
+        for (const r of results) {
+          const url = normalizeResumeURL(r.link);
+
+          // Skip if no valid URL
+          if (!url || !url.startsWith('https://') || !url.includes('craigslist.org')) continue;
+
+          // Skip if demo data
+          if (isDemoLead(r)) {
+            console.warn(`[Worker] Blocked demo lead: ${url}`);
+            continue;
+          }
+
+          // Skip if already in dedup registry
+          if (globalDedupeSet.has(url)) continue;
+
+          // Skip if already seen in this run
+          if (seenUrls.has(url)) continue;
+
+          seenUrls.add(url);
+          allFreshResumes.push({ ...r, link: url, market: city.label });
+          addedCount++;
+        }
+
+        console.log(`[Worker] "${keyword}" in ${city.label}: ${results.length} raw → ${addedCount} fresh added (total: ${allFreshResumes.length})`);
+
+        // Delay between requests
+        await new Promise(r => setTimeout(r, 1000));
+
+      } catch (err) {
+        console.error(`[Worker] Failed "${keyword}" in ${city.label}:`, err.message);
+        // Continue to next keyword — do not stop entire distribution
+      }
+    }
+  }
+
+  console.log(`[Worker] Total fresh real leads available: ${allFreshResumes.length}`);
+
+  // Check if we have enough
+  if (allFreshResumes.length === 0) {
+    console.error('[Worker] POOL EXHAUSTED — zero real leads found across all cities and keywords');
+    if (globalDedupeSet.size > 500) {
+      await appendLog({
+        task:   'Distribution FAILED — dedup registry too large',
+        target: `Registry has ${globalDedupeSet.size} locked URLs filtering everything out. Run "Clear Old Dedup Entries" from admin panel or wait for Sunday auto-cleanup.`,
+        status: 'error',
+      });
+    } else {
+      await appendLog({
+        task:   'Distribution FAILED — no results from Apify',
+        target: 'Apify returned no results. Check Apify account has credits. Try running "Check Pool Status" from admin panel.',
+        status: 'error',
+      });
+    }
+    return;
+  }
+
+  if (allFreshResumes.length < needed) {
+    console.warn(`[Worker] LOW POOL — only ${allFreshResumes.length} leads for ${needed} needed`);
+    await appendLog({
+      task:   'Resume distribution — low pool warning',
+      target: `Only ${allFreshResumes.length} fresh leads available. ${needed} needed for ${agents.length} agents. Distributing what we have.`,
+      status: 'alert',
+    });
+    // Continue with what we have — do NOT abort
+  }
+
+  // ROUND-ROBIN distribution
+  const buckets = {};
+  agents.forEach(a => { buckets[a.name] = []; });
+
+  let pool = [...allFreshResumes];
+  let i    = 0;
+
+  while (pool.length > 0) {
+    const agent = agents[i % agents.length];
+    if (buckets[agent.name].length < DAILY_RESUME_LEADS_PER_WCR) {
+      buckets[agent.name].push(pool.shift());
+    }
+    i++;
+    if (agents.every(a => buckets[a.name].length >= DAILY_RESUME_LEADS_PER_WCR)) break;
+  }
+
+  // Save to Airtable + register in dedup
+  for (const agent of agents) {
+    const batch = buckets[agent.name];
+
+    if (batch.length === 0) {
+      await appendLog({
+        task:   'Resume distribution — agent skipped',
+        target: `${agent.name} received 0 leads — pool exhausted before reaching this agent`,
+        status: 'alert',
+      });
+      console.warn(`[Worker] ${agent.name}: 0 leads — pool exhausted`);
+      continue;
+    }
+
+    for (const resume of batch) {
+      const url = normalizeResumeURL(resume.link);
+
+      // Final demo check before saving
+      if (isDemoLead(resume)) {
+        console.error(`[Worker] BLOCKED demo lead at save time: ${url}`);
+        continue;
+      }
+
+      await saveResumeLead({
+        title:         resume.title,
+        description:   resume.description,
+        phone:         resume.phone || '',
+        craigslistUrl: url,
+        market:        resume.market,
+        assignedTo:    agent.name,
+        assignedDate:  today,
+        status:        'New',
+        source:        'apify',
+      });
+
+      await registerResumeAsAssigned(url, agent.name, today);
+      globalDedupeSet.add(url);
+    }
+
+    // Only AFTER successful save — create notification
+    if (batch.length > 0) {
+      await createAgentNotification(
+        agent.email,
+        agent.name,
+        batch.length,
+        'daily'
+      );
+    }
+
+    await appendLog({
+      task:   'Real resume leads distributed',
+      target: `${agent.name} → ${batch.length} real leads assigned`,
+      status: 'ok',
+    });
+
+    console.log(`[Worker] ✓ ${agent.name}: ${batch.length} real leads assigned`);
+  }
+
+  console.log('[Worker] Distribution complete');
+}
+
+
 
 // ─── Test mode ────────────────────────────────────────────────────────────────
 
