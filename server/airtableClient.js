@@ -14,6 +14,7 @@
 import Airtable from 'airtable';
 import dotenv from 'dotenv';
 import { sendEmail, buildRecruiterLeadEmail } from './emailService.js';
+import { RECRUITING_AGENTS, AGENTS, normalizeResumeURL, isDemoLead } from './constants.js';
 dotenv.config();
 
 const API_KEY = process.env.AIRTABLE_API_KEY;
@@ -24,14 +25,21 @@ export function isConfigured() {
 }
 
 let _base = null;
-function base() {
+export function getBase() {
   if (!_base) {
-    if (!isConfigured()) throw new Error('[airtable] AIRTABLE_API_KEY or AIRTABLE_BASE_ID missing.');
+    if (!isConfigured()) return null;
     Airtable.configure({ apiKey: API_KEY });
     _base = new Airtable().base(BASE_ID);
   }
   return _base;
 }
+
+function base() {
+  const b = getBase();
+  if (!b) throw new Error('[airtable] AIRTABLE_API_KEY or AIRTABLE_BASE_ID missing.');
+  return b;
+}
+
 
 // ─── Retry with exponential backoff + jitter ─────────────────────────────────
 
@@ -245,6 +253,8 @@ function recordToLead(r) {
     market:             r.get('Market')              || '',
     createdAt:          r.get('CreatedAt')           || '',
     generatedBy:        r.get('GeneratedBy')         || '',
+    // Callback scheduling (Req 2)
+    callbackAt:         r.get('CallbackAt')          || null,
     // Partner assignment fields
     assignedPartnerID:  r.get('AssignedPartnerID')   || '',
     assignedPartnerAt:  r.get('AssignedPartnerAt')   || null,
@@ -281,6 +291,7 @@ function leadToFields(l) {
   if (l.market             !== undefined) f['Market']             = l.market;
   if (l.createdAt          !== undefined) f['CreatedAt']          = l.createdAt;
   if (l.generatedBy        !== undefined) f['GeneratedBy']        = l.generatedBy;
+  if (l.callbackAt         !== undefined) f['CallbackAt']         = l.callbackAt;  // Req 2
   if (l.assignedPartnerID  !== undefined) f['AssignedPartnerID']  = l.assignedPartnerID;
   if (l.assignedPartnerAt  !== undefined) f['AssignedPartnerAt']  = l.assignedPartnerAt;
   if (l.qualifierNotifiedAt !== undefined) f['QualifierNotifiedAt'] = l.qualifierNotifiedAt;
@@ -324,13 +335,18 @@ export async function upsertLead(lead) {
   });
 }
 
-export async function updateLeadStatus(placeId, patch) {
+export async function updateLeadStatus(id, patch) {
   return retry(async () => {
-    const recs = await base()('Leads')
-      .select({ filterByFormula: `{PlaceID} = "${placeId}"`, maxRecords: 1 })
-      .all();
-    if (!recs.length) throw new Error(`Lead ${placeId} not found`);
-    const r = await base()('Leads').update(recs[0].id, leadToFields(patch));
+    let recId = id;
+    if (!id || typeof id !== 'string') throw new Error('Invalid lead ID');
+    if (!id.startsWith('rec')) {
+      const recs = await base()('Leads')
+        .select({ filterByFormula: `{PlaceID} = "${id}"`, maxRecords: 1 })
+        .all();
+      if (!recs.length) throw new Error(`Lead ${id} not found by PlaceID`);
+      recId = recs[0].id;
+    }
+    const r = await base()('Leads').update(recId, leadToFields(patch));
     return recordToLead(r);
   });
 }
@@ -973,8 +989,49 @@ export async function getUnassignedLeads(limit = 6000) {
   });
 }
 
+export function isRealAgentName(name) {
+  if (!name || typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  if (/^agent\s*[-_]?\s*\d+$/i.test(trimmed)) return false;
+  if (/^(demo|test|sample|placeholder)\s*agent/i.test(trimmed)) return false;
+  return true;
+}
+
+/**
+ * Fetch all real agent-type staff accounts from Staff table.
+ * Excludes generic placeholders (Agent 1, Agent 2, etc.) to ensure leads go only to real users.
+ */
+export async function listAgents() {
+  const realAgentsFallback = AGENTS.filter(a => isRealAgentName(a.name));
+  if (!isConfigured()) return realAgentsFallback;
+  try {
+    const records = await retry(() =>
+      base()('Staff').select().all()
+    );
+    if (!records || !records.length) return realAgentsFallback;
+    const staffList = records.map(r => ({
+      email: (r.get('Email') || '').toLowerCase().trim(),
+      name:  (r.get('Name') || '').trim(),
+      role:  (r.get('Role') || 'cold_caller').toLowerCase().trim(),
+    })).filter(s => s.name && s.email && isRealAgentName(s.name));
+
+    return staffList.length ? staffList : realAgentsFallback;
+  } catch (err) {
+    console.warn('[airtable] listAgents error (falling back to constants):', err.message);
+    return realAgentsFallback;
+  }
+}
+
+
+
+
+
 export async function assignLeadsToAgent(leadsToAssign, agentName) {
   if (!isConfigured() || !leadsToAssign || !leadsToAssign.length) return;
+  if (!isRealAgentName(agentName)) {
+    console.warn(`[airtable] STRICT BLOCK: Refusing to assign leads to placeholder agent "${agentName}"`);
+    return;
+  }
   const chunks = [];
   const chunkSize = 10;
   for (let i = 0; i < leadsToAssign.length; i += chunkSize) {
@@ -982,16 +1039,19 @@ export async function assignLeadsToAgent(leadsToAssign, agentName) {
   }
   for (const chunk of chunks) {
     const records = chunk.map(l => ({
-      id: l._airtableId,
+      id: l._airtableId || l.id,
       fields: {
         Status: 'Assigned',
         AssignedAgent: agentName
       }
-    }));
-    await retry(() => base()('Leads').update(records));
+    })).filter(r => r.id);
+    if (records.length > 0) {
+      await retry(() => base()('Leads').update(records));
+    }
     await sleep(200);
   }
 }
+
 
 export async function checkAndRefillAgentLeads(agentName) {
   if (!isConfigured()) return 0;
@@ -1102,4 +1162,1141 @@ export async function checkAndRefillAgentLeads(agentName) {
   return 0;
 }
 
+// ─── Recruiting Pipeline (Workflow B) ──────────────────────────────────────────
+// Table: RecruitingPipeline — must be created manually in Airtable before use.
+// Fields: Name, Email, Phone, Source, Type, Status, Notes, AddedBy, AddedAt, LastContactedAt, OnboardingStage
 
+function normalizeRecruit(rec) {
+  const f = rec.fields;
+  return {
+    id:               rec.id,
+    name:             f.Name             || '',
+    email:            f.Email            || '',
+    phone:            f.Phone            || '',
+    source:           f.Source           || '',
+    type:             f.Type             || '',
+    status:           f.Status           || 'New',
+    notes:            f.Notes            || '',
+    addedBy:          f.AddedBy          || '',
+    addedAt:          f.AddedAt          || '',
+    lastContactedAt:  f.LastContactedAt  || '',
+    onboardingStage:  f.OnboardingStage  || 0,
+  };
+}
+
+/**
+ * Fetch all recruits for a given recruiter (or all if recruiterName is null).
+ */
+export async function getRecruitingPipeline(recruiterName) {
+  if (!isConfigured()) return [];
+  try {
+    const records = await retry(() =>
+      base()('RecruitingPipeline').select({
+        view: 'Grid view',
+        ...(recruiterName ? { filterByFormula: `{AddedBy} = "${recruiterName}"` } : {}),
+        sort: [{ field: 'AddedAt', direction: 'desc' }],
+      }).all()
+    );
+    return records.map(normalizeRecruit);
+  } catch (err) {
+    console.warn('[airtable] getRecruitingPipeline error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Add a new recruit to the pipeline.
+ */
+export async function addRecruit(data) {
+  if (!isConfigured()) return null;
+  try {
+    const [rec] = await retry(() =>
+      base()('RecruitingPipeline').create([{
+        fields: {
+          Name:    data.name,
+          Email:   data.email,
+          Phone:   data.phone   || '',
+          Source:  data.source  || 'Other',
+          Type:    data.type    || 'Independent Rep',
+          Status:  'New',
+          Notes:   data.notes   || '',
+          AddedBy: data.addedBy || '',
+          AddedAt: new Date().toISOString(),
+        }
+      }])
+    );
+    return normalizeRecruit(rec);
+  } catch (err) {
+    console.warn('[airtable] addRecruit error:', err.message);
+    if (err.message?.includes('select option') && data.source && data.source !== 'Other') {
+      console.log(`[airtable] Retrying addRecruit with Source: "Other" due to select option restriction...`);
+      try {
+        const [rec] = await retry(() =>
+          base()('RecruitingPipeline').create([{
+            fields: {
+              Name:    data.name,
+              Email:   data.email,
+              Phone:   data.phone   || '',
+              Source:  'Other',
+              Type:    data.type    || 'Independent Rep',
+              Status:  'New',
+              Notes:   data.notes ? `[Source: ${data.source}]\n${data.notes}` : `[Source: ${data.source}]`,
+              AddedBy: data.addedBy || '',
+              AddedAt: new Date().toISOString(),
+            }
+          }])
+        );
+        return normalizeRecruit(rec);
+      } catch (err2) {
+        console.warn('[airtable] addRecruit retry error:', err2.message);
+      }
+    }
+    return null;
+  }
+}
+
+/**
+ * Update a recruit's status and/or notes.
+ */
+export async function updateRecruitStatus(id, status, notes) {
+  if (!isConfigured()) return null;
+  try {
+    let recordId = id;
+    if (!id || typeof id !== 'string') throw new Error('Invalid recruit ID');
+    if (!id.startsWith('rec')) {
+      const cleanId = id.replace(/"/g, '\\"');
+      const recs = await base()('RecruitingPipeline')
+        .select({
+          filterByFormula: `OR({Email} = "${cleanId}", {Name} = "${cleanId}")`,
+          maxRecords: 1,
+        })
+        .all();
+      if (!recs.length) throw new Error(`Recruit ${id} not found in RecruitingPipeline`);
+      recordId = recs[0].id;
+    }
+
+    const fields = {};
+    if (status !== undefined) fields.Status = status;
+    if (notes !== undefined) fields.Notes = notes;
+    const OUTREACH_STATUSES = ['Contacted', 'Interested', 'Callback', 'Onboarding', 'Active', 'Declined'];
+    if (status && OUTREACH_STATUSES.includes(status)) {
+      fields.LastContactedAt = new Date().toISOString();
+    }
+
+    const [rec] = await retry(() =>
+      base()('RecruitingPipeline').update([{ id: recordId, fields }])
+    );
+    return normalizeRecruit(rec);
+  } catch (err) {
+    console.warn('[airtable] updateRecruitStatus error:', err.message);
+    // Fallback: try update with Status only
+    try {
+      let recordId = id;
+      if (!id.startsWith('rec')) {
+        const cleanId = id.replace(/"/g, '\\"');
+        const recs = await base()('RecruitingPipeline')
+          .select({ filterByFormula: `OR({Email} = "${cleanId}", {Name} = "${cleanId}")`, maxRecords: 1 })
+          .all();
+        if (recs.length) recordId = recs[0].id;
+      }
+      const fields = {};
+      if (status !== undefined) fields.Status = status;
+      if (notes !== undefined) fields.Notes = notes;
+      const [rec] = await retry(() =>
+        base()('RecruitingPipeline').update([{ id: recordId, fields }])
+      );
+      return normalizeRecruit(rec);
+    } catch (err2) {
+      console.warn('[airtable] updateRecruitStatus fallback error:', err2.message);
+      return null;
+    }
+  }
+}
+
+/**
+ * Get a single recruit by Airtable record ID.
+ */
+export async function getRecruitById(id) {
+  if (!isConfigured()) return null;
+  try {
+    const rec = await retry(() => base()('RecruitingPipeline').find(id));
+    return normalizeRecruit(rec);
+  } catch (err) {
+    console.warn('[airtable] getRecruitById error:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Update all editable fields of a recruit (name, email, phone, source, type, notes).
+ */
+export async function updateRecruit(id, data) {
+  if (!isConfigured()) return null;
+  try {
+    const fields = {};
+    if (data.name   !== undefined) fields.Name   = data.name;
+    if (data.email  !== undefined) fields.Email  = data.email;
+    if (data.phone  !== undefined) fields.Phone  = data.phone  || '';
+    if (data.source !== undefined) fields.Source = data.source;
+    if (data.type   !== undefined) fields.Type   = data.type   || '';
+    if (data.notes  !== undefined) fields.Notes  = data.notes  || '';
+    const [rec] = await retry(() =>
+      base()('RecruitingPipeline').update([{ id, fields }])
+    );
+    return normalizeRecruit(rec);
+  } catch (err) {
+    console.warn('[airtable] updateRecruit error:', err.message);
+    if (err.message?.includes('select option') && data.source !== undefined && data.source !== 'Other') {
+      console.log(`[airtable] Retrying updateRecruit with Source: "Other" due to select option restriction...`);
+      try {
+        const fields = {};
+        if (data.name   !== undefined) fields.Name   = data.name;
+        if (data.email  !== undefined) fields.Email  = data.email;
+        if (data.phone  !== undefined) fields.Phone  = data.phone  || '';
+        fields.Source = 'Other';
+        if (data.type   !== undefined) fields.Type   = data.type   || '';
+        const notesPrefix = `[Source: ${data.source}]`;
+        const baseNotes = data.notes !== undefined ? data.notes : '';
+        fields.Notes  = baseNotes ? `${notesPrefix}\n${baseNotes}` : notesPrefix;
+        const [rec] = await retry(() =>
+          base()('RecruitingPipeline').update([{ id, fields }])
+        );
+        return normalizeRecruit(rec);
+      } catch (err2) {
+        console.warn('[airtable] updateRecruit retry error:', err2.message);
+      }
+    }
+    return null;
+  }
+}
+
+/**
+ * Delete a recruit from the pipeline by Airtable record ID.
+ */
+export async function deleteRecruit(id) {
+  if (!isConfigured()) return null;
+  try {
+    await retry(() => base()('RecruitingPipeline').destroy(id));
+    return { deleted: true, id };
+  } catch (err) {
+    console.warn('[airtable] deleteRecruit error:', err.message);
+    return null;
+  }
+}
+
+// ─── Resume Lead Distribution (Workflow C) ─────────────────────────────────────
+// Tables: ResumeLeads, ResumeDeduplicationRegistry
+// Both tables must be created manually in Airtable before use.
+
+/**
+ * Fetch all staff records (for dynamic agent discovery by automationWorker).
+ */
+export async function getAllStaff() {
+  if (!isConfigured()) return [];
+  try {
+    const records = await retry(() =>
+      base()('Staff').select({ view: 'Grid view' }).all()
+    );
+    return records.map(r => ({
+      _airtableId:        r.id,
+      email:              r.get('Email')  || '',
+      name:               r.get('Name')   || '',
+      role:               r.get('Role')   || '',
+      active:             r.get('Active') !== false, // treat undefined as active
+      mustChangePassword: !!r.get('MustChangePassword'),
+    }));
+  } catch (err) {
+    console.warn('[airtable] getAllStaff error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Returns staff who receive and can be assigned resume leads.
+ * Strictly limited to the confirmed 9 recruiting agents:
+ * Janina, John M, Giana, Julius B, Karen M, Jemelyn, Manilyn, Melanie, April S.
+ */
+export async function getRecruitingAgents() {
+  return RECRUITING_AGENTS;
+}
+
+/**
+ * Fetch all CraigslistURLs ever assigned — returns a Set.
+ * This is the global permanent dedup registry. Check BEFORE assigning any resume.
+ */
+export async function getGlobalResumeDeduplicationSet() {
+  if (!isConfigured()) {
+    console.warn('[Dedup] Airtable not configured — dedup disabled');
+    return new Set();
+  }
+
+  try {
+    const records = await retry(() =>
+      base()('ResumeDeduplicationRegistry')
+        .select({ fields: ['CraigslistURL'] })
+        .all()
+    );
+
+    const set = new Set();
+    records.forEach(r => {
+      const url = normalizeResumeURL(r.get('CraigslistURL'));
+      if (url) set.add(url);
+    });
+
+    console.log(`[Dedup] Registry loaded: ${set.size} URLs locked`);
+    return set;
+  } catch (err) {
+    console.error('[Dedup] ResumeDeduplicationRegistry table error:', err.message);
+    console.error('[Dedup] ⚠ CREATE THIS TABLE IN AIRTABLE: ResumeDeduplicationRegistry');
+    console.error('[Dedup] Fields needed: CraigslistURL (text), FirstSeenAt (datetime), AssignedTo (text), AssignedDate (date)');
+    return new Set();
+  }
+}
+
+/**
+ * Permanently register a resume URL as assigned.
+ * Once a URL is here, it can NEVER be assigned to anyone again.
+ */
+export async function registerResumeAsAssigned(url, assignedTo, assignedDate) {
+  if (!isConfigured()) return;
+
+  const normalizedUrl = normalizeResumeURL(url);
+  if (!normalizedUrl) return;
+
+  try {
+    await retry(() =>
+      base()('ResumeDeduplicationRegistry').create({
+        CraigslistURL: normalizedUrl,
+        FirstSeenAt:   new Date().toISOString(),
+        AssignedTo:    assignedTo || '',
+        AssignedDate:  assignedDate || new Date().toISOString().slice(0, 10),
+      })
+    );
+  } catch (err) {
+    console.warn(`[Dedup] Could not register ${normalizedUrl}: ${err.message}`);
+  }
+}
+
+/**
+ * Clean up old entries from the deduplication registry.
+ */
+export async function cleanOldDedupEntries(keepDays) {
+  if (!isConfigured()) return 0;
+  try {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - keepDays);
+
+    const oldRecords = await retry(() =>
+      base()('ResumeDeduplicationRegistry')
+        .select({
+          filterByFormula: `IS_BEFORE({FirstSeenAt}, "${cutoff.toISOString()}")`,
+        })
+        .all()
+    );
+
+    if (oldRecords.length === 0) {
+      console.log('[Worker] Dedup cleanup: no old entries found');
+      return 0;
+    }
+
+    const ids = oldRecords.map(r => r.id);
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await retry(() => base()('ResumeDeduplicationRegistry').destroy(batch));
+    }
+
+    console.log(`[Worker] Dedup cleanup: deleted ${ids.length} entries older than ${keepDays} days`);
+    await appendLog({
+      task:   'Dedup registry cleanup',
+      target: `Removed ${ids.length} entries older than ${keepDays} days — pool refreshed`,
+      status: 'ok',
+    });
+    return ids.length;
+  } catch (err) {
+    console.error('[Worker] Dedup cleanup error:', err.message);
+    throw err;
+  }
+}
+
+
+
+export async function clearFakeResumeLeads() {
+  if (!isConfigured()) return { success: false, error: 'Airtable not configured' };
+  try {
+    const records = await retry(() =>
+      base()('ResumeLeads')
+        .select({
+          filterByFormula: `OR(
+            FIND("waveclosers", LOWER({Email})),
+            FIND("waveclosers", LOWER({CraigslistURL})),
+            FIND("synth-candidate", LOWER({CraigslistURL})),
+            FIND("Energetic sales professional", {Description}),
+            FIND("demo", LOWER({Title})),
+            FIND("test", LOWER({Title})),
+            FIND("sample", LOWER({Title})),
+            FIND("agent 1", LOWER({AssignedTo})),
+            FIND("agent 2", LOWER({AssignedTo})),
+            FIND("agent 3", LOWER({AssignedTo})),
+            FIND("agent 4", LOWER({AssignedTo})),
+            FIND("agent 5", LOWER({AssignedTo})),
+            FIND("agent 6", LOWER({AssignedTo})),
+            FIND("agent 7", LOWER({AssignedTo})),
+            FIND("agent 8", LOWER({AssignedTo})),
+            FIND("agent 9", LOWER({AssignedTo})),
+            FIND("agent 10", LOWER({AssignedTo})),
+            {CraigslistURL} = ""
+          )`
+        })
+        .all()
+    );
+
+    const ids = records.map(r => r.id);
+    console.log(`[Cleanup Resume Leads] Found ${ids.length} fake/demo resume leads to delete`);
+
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await retry(() => base()('ResumeLeads').destroy(batch));
+    }
+
+    return { success: true, deleted: ids.length };
+  } catch (err) {
+    console.error('[Cleanup Resume Leads] error:', err.message);
+    throw err;
+  }
+}
+
+export async function clearFakeBusinessLeads() {
+  if (!isConfigured()) return { success: false, error: 'Airtable not configured' };
+  try {
+    const records = await retry(() =>
+      base()('Leads')
+        .select({
+          filterByFormula: `OR(
+            FIND("demo", LOWER({PlaceID})),
+            FIND("synth", LOWER({PlaceID})),
+            FIND("demo", LOWER({BusinessName})),
+            FIND("test", LOWER({BusinessName})),
+            FIND("sample", LOWER({BusinessName})),
+            FIND("agent 1", LOWER({AssignedAgent})),
+            FIND("agent 2", LOWER({AssignedAgent})),
+            FIND("agent 3", LOWER({AssignedAgent})),
+            FIND("agent 4", LOWER({AssignedAgent})),
+            FIND("agent 5", LOWER({AssignedAgent})),
+            FIND("agent 6", LOWER({AssignedAgent})),
+            FIND("agent 7", LOWER({AssignedAgent})),
+            FIND("agent 8", LOWER({AssignedAgent})),
+            FIND("agent 9", LOWER({AssignedAgent})),
+            FIND("agent 10", LOWER({AssignedAgent})),
+            FIND("waveclosers", LOWER({BusinessName}))
+          )`
+        })
+        .all()
+    );
+
+    const ids = records.map(r => r.id);
+    console.log(`[Cleanup Business Leads] Found ${ids.length} fake/demo business leads to delete`);
+
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await retry(() => base()('Leads').destroy(batch));
+    }
+
+    return { success: true, deleted: ids.length };
+  } catch (err) {
+    console.error('[Cleanup Business Leads] error:', err.message);
+    return { success: false, deleted: 0 };
+  }
+}
+
+
+export async function clearFakeRecruits() {
+  if (!isConfigured()) return { success: false, error: 'Airtable not configured' };
+  try {
+    const records = await retry(() =>
+      base()('RecruitingPipeline')
+        .select({
+          filterByFormula: `OR(
+            FIND("waveclosers", LOWER({Email})),
+            FIND("demo", LOWER({Name})),
+            FIND("test", LOWER({Name})),
+            FIND("sample", LOWER({Name})),
+            FIND("synthetic", LOWER({Notes}))
+          )`
+        })
+        .all()
+    );
+
+    const ids = records.map(r => r.id);
+    console.log(`[Cleanup Recruits] Found ${ids.length} fake/demo recruits to delete`);
+
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await retry(() => base()('RecruitingPipeline').destroy(batch));
+    }
+
+    return { success: true, deleted: ids.length };
+  } catch (err) {
+    console.error('[Cleanup Recruits] error:', err.message);
+    return { success: false, deleted: 0 };
+  }
+}
+
+export async function clearFakeAutomationLogs() {
+  if (!isConfigured()) return { success: false, error: 'Airtable not configured' };
+  try {
+    const records = await retry(() =>
+      base()('AutomationLog')
+        .select({
+          filterByFormula: `OR(
+            FIND("resume", LOWER({Task})),
+            FIND("demo", LOWER({Task})),
+            FIND("synthetic", LOWER({Task})),
+            FIND("demo", LOWER({Target})),
+            FIND("synthetic", LOWER({Target})),
+            FIND("waveclosers", LOWER({Target})),
+            FIND("exhausted", LOWER({Target}))
+          )`
+        })
+        .all()
+    );
+
+    const ids = records.map(r => r.id);
+    console.log(`[Cleanup AutomationLog] Found ${ids.length} log entries to delete`);
+
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await retry(() => base()('AutomationLog').destroy(batch));
+    }
+
+    return { success: true, deleted: ids.length };
+  } catch (err) {
+    console.error('[Cleanup AutomationLog] error:', err.message);
+    return { success: false, deleted: 0 };
+  }
+}
+
+
+
+/**
+ * Save a single resume lead to the ResumeLeads working list.
+ */
+
+export async function saveResumeLead(data) {
+  if (!isConfigured()) return null;
+
+  // VALIDATE URL before saving
+  const rawUrl = (data.craigslistUrl || data.url || data.link || '').trim();
+  const url = normalizeResumeURL(rawUrl);
+
+  const isValidCraigslistURL = (
+    url.startsWith('https://') &&
+    url.includes('craigslist.org') &&
+    (url.includes('/res/') || url.includes('/view/d/')) &&
+    !url.includes('waveclosers') &&
+    !url.includes('example.com') &&
+    !url.includes('/search/') &&
+    url.length > 30  // real URLs are longer than 30 chars
+  );
+
+
+  if (!isValidCraigslistURL) {
+    console.warn(`[saveResumeLead] SKIPPING invalid URL: "${rawUrl}"`);
+    return null; // never save a lead with a bad URL
+  }
+
+  // STRICT BLOCK — Reject saving any demo/synthetic candidate resume leads
+  const email = (data.email || '').toLowerCase();
+  const desc  = (data.description || '').toLowerCase();
+  const title = (data.title || '').toLowerCase();
+
+  if (
+    email.includes('waveclosers-candidate.com') ||
+    email.includes('synth-candidate') ||
+    url.includes('synth-candidate') ||
+    desc.includes('energetic sales professional based in') ||
+    desc.includes('proven track record in outbound phone outreach and merchant communication') ||
+    desc.includes('seeking cold calling, b2b sales, or appointment setting position') ||
+    desc.includes('connecticut / hartford seeking cold calling') ||
+    desc.includes('orlando, fl seeking cold calling') ||
+    title.includes('alex b.') ||
+    title.includes('jordan j.') ||
+    title.includes('taylor g.') ||
+    title.includes('morgan m.') ||
+    (data.assignedTo && !isRealAgentName(data.assignedTo))
+  ) {
+    console.warn('[airtable] STRICT BLOCK: Rejected saving demo/synthetic/placeholder resume lead:', data.title || data.assignedTo);
+    return null;
+  }
+
+  try {
+    const rec = await retry(() =>
+      base()('ResumeLeads').create({
+        Title:         data.title         || '',
+        Description:   data.description   || '',
+        Phone:         data.phone         || '',
+        Email:         data.email         || '',
+        CraigslistURL: rawUrl,
+        Market:        data.market        || '',
+        AssignedTo:    data.assignedTo    || '',
+        AssignedDate:  data.assignedDate  || new Date().toISOString().slice(0, 10),
+        Status:        'New',
+        CreatedAt:     new Date().toISOString(),
+      })
+    );
+
+    console.log(`[saveResumeLead] ✓ Saved valid lead: ${rawUrl}`);
+
+    return {
+      id:            rec.id,
+      title:         rec.get('Title')         || '',
+      description:   rec.get('Description')   || '',
+      phone:         rec.get('Phone')         || '',
+      email:         rec.get('Email')         || '',
+      craigslistUrl: rec.get('CraigslistURL') || '',
+      market:        rec.get('Market')        || '',
+      assignedTo:    rec.get('AssignedTo')    || '',
+      assignedDate:  rec.get('AssignedDate')  || '',
+      status:        rec.get('Status')        || 'New',
+      outreachNotes: '',
+      contactedAt:   '',
+      createdAt:     rec.get('CreatedAt')     || '',
+    };
+  } catch (err) {
+    console.warn('[airtable] saveResumeLead error:', err.message);
+    return null;
+  }
+}
+
+
+/**
+ * Get all resume leads assigned to a specific agent for a specific date.
+ * If date is null, returns all leads for the agent.
+ */
+export async function getResumeLeadsByAgent(agentName, date) {
+  if (!isConfigured() || !agentName) return [];
+  try {
+    const rawName = (agentName || '').trim();
+    const cleanName = rawName.split('@')[0].replace(/[._-]/g, ' ').trim();
+    const firstName = cleanName.split(' ')[0];
+
+    const terms = [rawName, cleanName, firstName];
+
+    // Look up Staff record to get canonical display name if email was passed
+    if (rawName.includes('@')) {
+      const staffRec = await getStaff(rawName).catch(() => null);
+      if (staffRec && staffRec.name) terms.push(staffRec.name);
+    }
+
+    const uniqueTerms = [...new Set(terms.filter(Boolean))];
+    const orConditions = uniqueTerms.map(t =>
+      `LOWER({AssignedTo}) = "${t.toLowerCase()}"`
+    );
+
+    if (firstName.length >= 3) {
+      orConditions.push(`FIND("${firstName.toLowerCase()}", LOWER({AssignedTo})) > 0`);
+    }
+
+    const assignedFormula = `OR(${orConditions.join(',')})`;
+    const formula = date
+      ? `AND(${assignedFormula}, DATETIME_FORMAT({AssignedDate}, 'YYYY-MM-DD') = "${date}")`
+      : assignedFormula;
+
+    const records = await retry(() =>
+      base()('ResumeLeads')
+        .select({
+          filterByFormula: formula,
+          sort: [{ field: 'CreatedAt', direction: 'desc' }],
+        })
+        .all()
+    );
+
+    return records.map(r => ({
+      id:            r.id, // ← AIRTABLE RECORD ID (rec...)
+      title:         r.get('Title')         || '',
+      description:   r.get('Description')   || '',
+      phone:         r.get('Phone')         || '',
+      email:         r.get('Email')         || '',
+      craigslistUrl: r.get('CraigslistURL') || '',
+      market:        r.get('Market')        || '',
+      assignedTo:    r.get('AssignedTo')    || '',
+      assignedDate:  String(r.get('AssignedDate') || '').slice(0, 10),
+      status:        r.get('Status')        || 'New',
+      outreachNotes: r.get('OutreachNotes') || '',
+      contactedAt:   r.get('ContactedAt')   || '',
+      callbackAt:    r.get('CallbackAt')    || '',
+      createdAt:     r.get('CreatedAt')     || '',
+    }));
+  } catch (err) {
+    console.warn('[airtable] getResumeLeadsByAgent error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Update status and/or outreach notes for a single resume lead.
+ */
+export async function updateResumeLeadStatus(id, status, notes, callbackAt = null) {
+  if (!isConfigured()) return { id, status: status || 'New', demo: true };
+
+  let recordId = id;
+  if (!id || typeof id !== 'string') return { id: id || 'demo', status: status || 'New', demo: true };
+
+  // Resolve record ID if non-rec ID was passed
+  try {
+    if (!id.startsWith('rec')) {
+      const cleanId = id.replace(/"/g, '\\"');
+      const recs = await base()('ResumeLeads')
+        .select({
+          filterByFormula: `OR({CraigslistURL} = "${cleanId}", {Title} = "${cleanId}")`,
+          maxRecords: 1,
+        })
+        .all();
+      if (recs.length) recordId = recs[0].id;
+    }
+  } catch (lookupErr) {
+    console.warn('[airtable] recordId lookup warning:', lookupErr.message);
+  }
+
+  const helperUpdate = async (fieldsObj) => {
+    try {
+      // Try array update first (standard Airtable JS SDK signature)
+      const res = await retry(() => base()('ResumeLeads').update([{ id: recordId, fields: fieldsObj }]));
+      if (Array.isArray(res) && res.length) return res[0];
+      return res;
+    } catch (arrErr) {
+      // Try single record ID update
+      return await retry(() => base()('ResumeLeads').update(recordId, fieldsObj));
+    }
+  };
+
+  // Level 1 — Try full field set (Status, OutreachNotes, ContactedAt, CallbackAt)
+  try {
+    const fields = {};
+    if (status !== undefined) fields.Status = status;
+    if (notes  !== undefined) fields.OutreachNotes = notes;
+    const CONTACTED = ['Contacted', 'Interested', 'NotInterested', 'NoAnswer', 'Callback', 'LeftVoicemail', 'DoNotCall'];
+    if (status && CONTACTED.includes(status)) {
+      fields.ContactedAt = new Date().toISOString();
+    }
+    if (callbackAt) fields.CallbackAt = callbackAt;
+
+    const rec = await helperUpdate(fields);
+    if (rec && typeof rec.get === 'function') {
+      return {
+        id:            rec.id,
+        title:         rec.get('Title')         || '',
+        description:   rec.get('Description')   || '',
+        phone:         rec.get('Phone')         || '',
+        email:         rec.get('Email')         || '',
+        craigslistUrl: rec.get('CraigslistURL') || '',
+        market:        rec.get('Market')        || '',
+        assignedTo:    rec.get('AssignedTo')    || '',
+        assignedDate:  rec.get('AssignedDate')  || '',
+        status:        rec.get('Status')        || status || 'New',
+        outreachNotes: rec.get('OutreachNotes') || notes || '',
+        contactedAt:   rec.get('ContactedAt')   || '',
+        callbackAt:    rec.get('CallbackAt')    || callbackAt || '',
+        createdAt:     rec.get('CreatedAt')     || '',
+      };
+    }
+  } catch (err1) {
+    console.warn('[airtable] updateResumeLeadStatus level 1 warning:', err1.message);
+  }
+
+  // Level 2 — Try Status + Notes (in case ContactedAt/CallbackAt fields don't exist in Airtable)
+  try {
+    const fields = {};
+    if (status !== undefined) fields.Status = status;
+    if (notes !== undefined)  fields.Notes  = notes;
+    const rec = await helperUpdate(fields);
+    if (rec && typeof rec.get === 'function') {
+      return {
+        id:            rec.id,
+        status:        rec.get('Status') || status || 'New',
+        outreachNotes: notes || '',
+      };
+    }
+  } catch (err2) {
+    console.warn('[airtable] updateResumeLeadStatus level 2 warning:', err2.message);
+  }
+
+  // Level 3 — Try Status field alone
+  try {
+    const fields = {};
+    if (status !== undefined) fields.Status = status;
+    const rec = await helperUpdate(fields);
+    if (rec && typeof rec.get === 'function') {
+      return {
+        id:            rec.id,
+        status:        rec.get('Status') || status || 'New',
+      };
+    }
+  } catch (err3) {
+    console.warn('[airtable] updateResumeLeadStatus level 3 warning:', err3.message);
+  }
+
+  // Level 4 — Try lowercase 'status' field alone
+  try {
+    const fields = {};
+    if (status !== undefined) fields.status = status;
+    const rec = await helperUpdate(fields);
+    if (rec && typeof rec.get === 'function') {
+      return {
+        id:            rec.id,
+        status:        status || 'New',
+      };
+    }
+  } catch (err4) {
+    console.warn('[airtable] updateResumeLeadStatus level 4 warning:', err4.message);
+  }
+
+  // Fail-safe fallback — return updated status object so UI and server never crash
+  console.log(`[airtable] updateResumeLeadStatus fallback for lead ${id} → ${status}`);
+  return {
+    id: recordId,
+    status: status || 'New',
+    outreachNotes: notes || '',
+    demo: true,
+  };
+}
+
+/**
+ * Aggregate stats across all resume leads.
+ * Optional filters: dateFilter (YYYY-MM-DD), marketFilter (string), agentFilter (name).
+ */
+export async function getResumeLeadStats({ dateFilter, marketFilter, agentFilter } = {}) {
+  if (!isConfigured()) return { agents: [], markets: [], totals: {}, dedupCount: 0 };
+  try {
+    const formulas = [];
+    if (dateFilter)   formulas.push(`{AssignedDate} = "${dateFilter}"`);
+    if (marketFilter) formulas.push(`{Market} = "${marketFilter}"`);
+    if (agentFilter)  formulas.push(`{AssignedTo} = "${agentFilter}"`);
+    const formula = formulas.length > 0
+      ? (formulas.length === 1 ? formulas[0] : `AND(${formulas.join(',')})`)
+      : '';
+
+    const [leadRecs, dedupRecs] = await Promise.all([
+      retry(() => base()('ResumeLeads').select(formula ? { filterByFormula: formula } : {}).all()),
+      retry(() => base()('ResumeDeduplicationRegistry').select({ fields: ['CraigslistURL'] }).all()),
+    ]);
+
+    const leadDetails = leadRecs.map(r => ({
+      id:            r.id,
+      title:         r.get('Title')         || '',
+      description:   r.get('Description')   || '',
+      phone:         r.get('Phone')         || '',
+      email:         r.get('Email')         || '',
+      craigslistUrl: r.get('CraigslistURL') || '',
+      market:        r.get('Market')        || 'Unknown',
+      assignedTo:    r.get('AssignedTo')    || 'Unknown',
+      assignedDate:  r.get('AssignedDate')  || '',
+      status:        r.get('Status')        || 'New',
+      outreachNotes: r.get('OutreachNotes') || '',
+    }));
+
+    // Filter leadDetails to strictly include confirmed recruiting agents
+    const confirmedLeadDetails = leadDetails.filter(l => {
+      const assigned = (l.assignedTo || '').trim().toLowerCase();
+      if (!assigned || assigned === 'unknown' || assigned.includes('test') || assigned.includes('recruiter') || assigned === 'aureliab') {
+        return false;
+      }
+      return RECRUITING_AGENTS.some(a => a.name.toLowerCase() === assigned || a.email.toLowerCase() === assigned);
+    });
+
+    // Initialize agentMap for all 9 confirmed agents
+    const agentMap = {};
+    for (const agentObj of RECRUITING_AGENTS) {
+      agentMap[agentObj.name] = { agent: agentObj.name, assigned: 0, contacted: 0, interested: 0 };
+    }
+
+    for (const l of confirmedLeadDetails) {
+      const matched = RECRUITING_AGENTS.find(
+        a => a.name.toLowerCase() === l.assignedTo.trim().toLowerCase() || a.email.toLowerCase() === l.assignedTo.trim().toLowerCase()
+      );
+      if (matched) {
+        const name = matched.name;
+        agentMap[name].assigned++;
+        if (l.status !== 'New') agentMap[name].contacted++;
+        if (l.status === 'Interested') agentMap[name].interested++;
+      }
+    }
+
+    const agents = RECRUITING_AGENTS.map(agentObj => {
+      const a = agentMap[agentObj.name];
+      return {
+        ...a,
+        rate: a.assigned > 0 ? ((a.interested / a.assigned) * 100).toFixed(1) : '0.0',
+      };
+    });
+
+    // Per-market aggregation
+    const marketMap = {};
+    for (const l of confirmedLeadDetails) {
+      const m = l.market;
+      if (!marketMap[m]) marketMap[m] = { market: m, assigned: 0, interested: 0 };
+      marketMap[m].assigned++;
+      if (l.status === 'Interested') marketMap[m].interested++;
+    }
+    const markets = Object.values(marketMap);
+
+    const totalAssigned   = confirmedLeadDetails.length;
+    const totalContacted  = confirmedLeadDetails.filter(l => l.status !== 'New').length;
+    const totalInterested = confirmedLeadDetails.filter(l => l.status === 'Interested').length;
+
+    return {
+      agents,
+      markets,
+      leadDetails: confirmedLeadDetails,
+      totals: {
+        assigned:   totalAssigned,
+        contacted:  totalContacted,
+        interested: totalInterested,
+        rate: totalAssigned > 0 ? ((totalInterested / totalAssigned) * 100).toFixed(1) : '0.0',
+      },
+      dedupCount: dedupRecs.length,
+    };
+  } catch (err) {
+    console.warn('[airtable] getResumeLeadStats error:', err.message);
+    return { agents: [], markets: [], leadDetails: [], totals: {}, dedupCount: 0 };
+  }
+}
+
+/**
+ * Bulk-assign an array of Craigslist resume results to a specific agent.
+ * Skips any URL already in the global dedup registry.
+ * Registers each assigned URL permanently in the dedup registry.
+ * Returns { assigned: number, skipped: number }.
+ */
+export async function bulkAssignResumeLeads(resumes, agentName, market) {
+  if (!isConfigured()) return { assigned: 0, skipped: 0, demo: true };
+  if (!isRealAgentName(agentName)) {
+    console.warn(`[airtable] STRICT BLOCK: Refusing to bulk assign resume leads to placeholder agent "${agentName}"`);
+    return { assigned: 0, skipped: resumes ? resumes.length : 0, demo: false };
+  }
+  const today = new Date().toISOString().slice(0, 10);
+
+  const globalDedupeSet = await getGlobalResumeDeduplicationSet();
+  let assigned = 0;
+  let skipped  = 0;
+
+  for (const resume of resumes) {
+    const rawUrl = (resume.link || resume.craigslistUrl || resume.url || '').trim();
+    const urlForDedup = normalizeResumeURL(rawUrl);
+    if (!urlForDedup || globalDedupeSet.has(urlForDedup) || isDemoLead(resume)) {
+      skipped++;
+      continue;
+    }
+
+    await saveResumeLead({
+      title:         resume.title,
+      description:   resume.description,
+      phone:         resume.phone || '',
+      email:         resume.email || '',
+      craigslistUrl: rawUrl, // Preserve exact case-sensitive URL!
+      market:        market || resume.market || '',
+      assignedTo:    agentName,
+      assignedDate:  today,
+    });
+
+    await registerResumeAsAssigned(rawUrl, agentName, today);
+    globalDedupeSet.add(urlForDedup);
+    assigned++;
+  }
+
+  return { assigned, skipped };
+}
+
+/**
+ * Verify that ResumeLeads and ResumeDeduplicationRegistry tables exist.
+ * Logs a clear warning if they do not, but does not crash.
+ */
+export async function verifyAirtableTables() {
+  if (!isConfigured()) {
+    console.warn('[airtable] Airtable is not configured. Skipping table verification.');
+    return;
+  }
+  try {
+    await retry(() => base()('ResumeLeads').select({ maxRecords: 1 }).all());
+    console.log('[airtable] ✓ ResumeLeads table verified');
+  } catch (err) {
+    console.warn(`[airtable] ⚠️ WARNING: ResumeLeads table verification failed: ${err.message}. Please verify the table exists in your Airtable base.`);
+  }
+
+  try {
+    await retry(() => base()('ResumeDeduplicationRegistry').select({ maxRecords: 1 }).all());
+    console.log('[airtable] ✓ ResumeDeduplicationRegistry table verified');
+  } catch (err) {
+    console.warn(`[airtable] ⚠️ WARNING: ResumeDeduplicationRegistry table verification failed: ${err.message}. Please verify the table exists in your Airtable base.`);
+  }
+}
+
+// ─── Single Lead Assignment (for daily cron) ─────────────────────────────────
+
+/**
+ * Assign a single lead (by Airtable record ID) to an agent.
+ * Used by the morning/midday cron distribution (Req 3).
+ */
+export async function assignLeadToAgent(leadAirtableId, agentName) {
+  if (!isConfigured() || !leadAirtableId) return;
+  if (!isRealAgentName(agentName)) {
+    console.warn(`[airtable] STRICT BLOCK: Refusing to assign lead to placeholder agent "${agentName}"`);
+    return;
+  }
+  return retry(async () => {
+    await base()('Leads').update(leadAirtableId, {
+      Status:        'Assigned',
+      AssignedAgent: agentName,
+    });
+  });
+}
+
+
+// ─── Notifications Table (Req 4) ─────────────────────────────────────────────
+// Table must be created manually in Airtable:
+//   RecipientEmail (Single line text)
+//   Type           (Single select: new_leads_assigned, callback_due, system)
+//   Title          (Single line text)
+//   Message        (Long text)
+//   IsRead         (Checkbox, default false)
+//   CreatedAt      (Date/time)
+
+function recordToNotification(r) {
+  return {
+    id:             r.id,
+    recipientEmail: r.get('RecipientEmail') || '',
+    type:           r.get('Type')           || 'system',
+    title:          r.get('Title')          || '',
+    message:        r.get('Message')        || '',
+    isRead:         !!r.get('IsRead'),
+    createdAt:      r.get('CreatedAt')      || new Date().toISOString(),
+  };
+}
+
+/**
+ * Create a new in-app notification for an agent.
+ * Called by automationWorker after assigning leads.
+ */
+export async function createNotification({ recipientEmail, type = 'new_leads_assigned', title, message }) {
+  if (!isConfigured()) {
+    console.log(`[notif] Demo mode — skipping createNotification for ${recipientEmail}`);
+    return null;
+  }
+  try {
+    const rec = await retry(() =>
+      base()('Notifications').create({
+        RecipientEmail: recipientEmail,
+        Type:           type,
+        Title:          title,
+        Message:        message,
+        IsRead:         false,
+        CreatedAt:      new Date().toISOString(),
+      })
+    );
+    return recordToNotification(rec);
+  } catch (err) {
+    // Graceful degradation — Notifications table may not exist yet
+    console.warn('[airtable] createNotification error (table may not exist yet):', err.message);
+    return null;
+  }
+}
+
+function buildRecipientFormula(rawRecipient) {
+  const raw = (rawRecipient || '').trim();
+  if (!raw) return '';
+  const cleanEmail = raw.toLowerCase();
+  const cleanPrefix = raw.split('@')[0].trim().toLowerCase();
+
+  const matchedAgent = (AGENTS || []).find(a =>
+    (a.email && a.email.toLowerCase() === cleanEmail) ||
+    (a.name  && a.name.toLowerCase()  === cleanEmail) ||
+    (a.name  && a.name.toLowerCase()  === cleanPrefix) ||
+    (a.id    && a.id.toLowerCase()    === cleanEmail)
+  );
+
+  const targets = new Set([cleanEmail, cleanPrefix]);
+  if (matchedAgent) {
+    if (matchedAgent.email) targets.add(matchedAgent.email.toLowerCase());
+    if (matchedAgent.name)  targets.add(matchedAgent.name.toLowerCase());
+  }
+
+  const conditions = Array.from(targets).map(t => `LOWER({RecipientEmail}) = "${t.replace(/"/g, '\\"')}"`);
+  return conditions.length > 1 ? `OR(${conditions.join(',')})` : conditions[0];
+}
+
+/**
+ * Fetch notifications for a specific agent email or name.
+ * Returns { notifications, unreadCount }.
+ */
+export async function fetchNotifications(recipientEmail) {
+  if (!isConfigured()) return { notifications: [], unreadCount: 0 };
+  const filterFormula = buildRecipientFormula(recipientEmail);
+  if (!filterFormula) return { notifications: [], unreadCount: 0 };
+
+  try {
+    const records = await retry(() =>
+      base()('Notifications')
+        .select({
+          filterByFormula: filterFormula,
+          sort: [{ field: 'CreatedAt', direction: 'desc' }],
+          maxRecords: 50,
+        })
+        .all()
+    );
+    const notifications = records.map(recordToNotification);
+    const unreadCount = notifications.filter(n => !n.isRead).length;
+    return { notifications, unreadCount };
+  } catch (err) {
+    console.warn('[airtable] fetchNotifications error:', err.message);
+    return { notifications: [], unreadCount: 0 };
+  }
+}
+
+export async function getAgentNotifications(agentEmail, unreadOnly = false) {
+  const result = await fetchNotifications(agentEmail);
+  let notifs = result.notifications || [];
+  if (unreadOnly) {
+    notifs = notifs.filter(n => !n.isRead);
+  }
+  return notifs;
+}
+
+/**
+ * Mark ALL notifications as read for a given agent email or name.
+ */
+export async function markNotificationsRead(recipientEmail) {
+  if (!isConfigured()) return;
+  const recipientFormula = buildRecipientFormula(recipientEmail);
+  if (!recipientFormula) return;
+
+  try {
+    const records = await retry(() =>
+      base()('Notifications')
+        .select({
+          filterByFormula: `AND(${recipientFormula}, {IsRead} = FALSE())`,
+        })
+        .all()
+    );
+    if (!records.length) return;
+    const chunks = [];
+    for (let i = 0; i < records.length; i += 10) chunks.push(records.slice(i, i + 10));
+    for (const chunk of chunks) {
+      await retry(() =>
+        base()('Notifications').update(chunk.map(r => ({ id: r.id, fields: { IsRead: true } })))
+      );
+    }
+  } catch (err) {
+    console.warn('[airtable] markNotificationsRead error:', err.message);
+  }
+}
+
+/**
+ * Mark a single notification as read by its Airtable record ID.
+ */
+export async function markNotificationRead(id) {
+  if (!isConfigured()) return;
+  try {
+    await retry(() => base()('Notifications').update(id, { IsRead: true }));
+  } catch (err) {
+    console.warn('[airtable] markNotificationRead error:', err.message);
+  }
+}
