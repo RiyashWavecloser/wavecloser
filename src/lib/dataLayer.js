@@ -37,9 +37,9 @@ export function setSession(token, user, mustChangePassword = false) {
 function isTokenExpired(token) {
   if (!token) return true;
   try {
-    const base64Body = token.split('.')[0];
+    const base64Body = token.split('.')[1];
     const payload = JSON.parse(atob(base64Body.replace(/-/g, '+').replace(/_/g, '/')));
-    return !payload.exp || payload.exp < Date.now();
+    return !payload.exp || payload.exp * 1000 < Date.now();
   } catch {
     return true;
   }
@@ -826,4 +826,27 @@ export async function verifyURLsAPI() {
     return { total: 0, valid: 0, invalid: 0, invalidPercentage: '0%', samples: [], error: e.message };
   }
 }
+
+/**
+ * Check the resume lead pool status (Admin/PM only).
+ */
+export async function checkPoolStatusAPI() {
+  try {
+    return await get('/api/resume-leads/pool-status');
+  } catch (e) {
+    throw new Error(e.message || 'Failed to fetch pool status');
+  }
+}
+
+/**
+ * Clear the deduplication registry for the last N days (Admin/PM only).
+ */
+export async function clearRecentDedup(days) {
+  try {
+    return await post('/api/resume-leads/clear-recent-dedup', { days });
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
 

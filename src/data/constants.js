@@ -701,3 +701,103 @@ export const TARGET_MARKETS = ALL_USA_CRAIGSLIST_CITIES;
 
 // CRAIGSLIST_CITIES must be declared AFTER ALL_USA_CRAIGSLIST_CITIES to avoid TDZ error
 export const CRAIGSLIST_CITIES = ALL_USA_CRAIGSLIST_CITIES.map(c => ({ label: c.label, value: c.slug }));
+
+export const RESUME_SEARCH_KEYWORDS = [
+  // Direct sales roles
+  'sales',
+  'sales rep',
+  'sales representative',
+  'sales associate',
+  'sales agent',
+  'sales consultant',
+  'sales executive',
+  'sales professional',
+  'sales manager',
+  'sales coordinator',
+
+  // Commission based
+  'commission sales',
+  'commission only',
+  'commission based',
+  'base plus commission',
+  'residual income',
+  'residual sales',
+
+  // Outbound/calling roles
+  'cold calling',
+  'cold caller',
+  'outbound sales',
+  'outbound calling',
+  'outbound calls',
+  'telemarketing',
+  'telesales',
+  'phone sales',
+  'inside sales',
+
+  // Field sales
+  'outside sales',
+  'field sales',
+  'door to door sales',
+  'door to door',
+  'direct sales',
+  'direct marketing',
+
+  // Business development
+  'business development',
+  'business development rep',
+  'BDR',
+  'SDR',
+  'sales development',
+  'account executive',
+  'account manager',
+  'account representative',
+
+  // Closing roles
+  'closer',
+  'sales closer',
+  'high ticket closer',
+  'appointment setter',
+  'appointment setting',
+
+  // Payment and merchant specific
+  'payment processing sales',
+  'merchant services',
+  'merchant sales',
+  'POS sales',
+  'point of sale sales',
+  'fintech sales',
+  'financial sales',
+
+  // B2B specific
+  'B2B sales',
+  'B2B representative',
+  'business to business',
+  'small business sales',
+  'SMB sales',
+
+  // General looking for work
+  'seeking sales position',
+  'sales experience',
+  'sales background',
+  'sales motivated',
+  'self motivated sales',
+  'results driven sales',
+  'goal oriented sales',
+
+  // Entry level and experienced
+  'entry level sales',
+  'junior sales',
+  'senior sales',
+  'experienced sales',
+  'sales professional available',
+  'sales talent',
+  'motivated sales',
+
+  // Referral and partner roles
+  'referral partner',
+  'affiliate sales',
+  'reseller',
+  'independent contractor sales',
+  'freelance sales',
+  '1099 sales',
+];

@@ -27,6 +27,7 @@ import {
   appendLog,
   getLeads,
 
+  getBase,
   getUnassignedLeads,
   assignLeadsToAgent,
   assignLeadToAgent,
@@ -36,10 +37,10 @@ import {
   // Resume Lead Distribution (Workflow C)
   getRecruitingAgents,
   getGlobalResumeDeduplicationSet,
-  normalizeResumeURL,
   bulkAssignResumeLeads,
   saveResumeLead,
   registerResumeAsAssigned,
+  cleanOldDedupEntries,
   // Notifications (Req 4)
   createNotification,
 } from './airtableClient.js';
@@ -54,7 +55,20 @@ import {
   buildLearningEnrollmentEmail,
   buildTrainingInviteEmail,
 } from './emailService.js';
-import { BENCHMARKS, WEEKLY_LEADS_PER_AGENT, NUM_AGENTS, AGENTS, DAILY_RESUME_LEADS_PER_WCR, RESUME_SEARCH_KEYWORDS_LIST, ALL_USA_CRAIGSLIST_CITIES, ALL_USA_BUSINESS_MARKETS } from './constants.js';
+import {
+  BENCHMARKS,
+  WEEKLY_LEADS_PER_AGENT,
+  NUM_AGENTS,
+  AGENTS,
+  DAILY_RESUME_LEADS_PER_WCR,
+  RESUME_SEARCH_KEYWORDS,
+  RESUME_SEARCH_KEYWORDS_LIST,
+  ALL_USA_CRAIGSLIST_CITIES,
+  ALL_USA_BUSINESS_MARKETS,
+  HIGH_VOLUME_CITIES,
+  normalizeResumeURL,
+  isDemoLead,
+} from './constants.js';
 import { generateLeads } from './leadWorker.js';
 import { fetchViaApify, fetchCraigslistResumesWithFallback } from './apifyClient.js';
 
@@ -305,20 +319,27 @@ async function poll() {
  * This prevents shortfalls by ensuring the pool is always fresh and geographically diverse.
  */
 function getCitiesForToday() {
-  const allCities = ALL_USA_CRAIGSLIST_CITIES;
-  const batchSize = 20; // search 20 cities per day
-  const today     = new Date();
-  const dayOfYear = Math.floor((today - new Date(today.getFullYear(), 0, 0)) / 86400000);
-  const startIndex = (dayOfYear * batchSize) % allCities.length;
+  // Always include top 5 high-volume cities
+  // Then rotate through the rest
+  const top5    = HIGH_VOLUME_CITIES.slice(0, 5);
+  const rest    = HIGH_VOLUME_CITIES.slice(5);
+  const allMore = ALL_USA_CRAIGSLIST_CITIES.filter(
+    c => !HIGH_VOLUME_CITIES.find(h => h.slug === c.slug)
+  );
 
-  const batch = [];
+  const dayOfYear  = Math.floor((new Date() - new Date(new Date().getFullYear(), 0, 0)) / 86400000);
+  const batchSize  = 15;
+  const startIndex = (dayOfYear * batchSize) % (rest.length + allMore.length);
+  const rotation   = [...rest, ...allMore];
+  const todayExtra = [];
+
   for (let i = 0; i < batchSize; i++) {
-    batch.push(allCities[(startIndex + i) % allCities.length]);
+    todayExtra.push(rotation[(startIndex + i) % rotation.length]);
   }
 
-  const batchNum = Math.floor((dayOfYear * batchSize) / allCities.length) + 1;
-  console.log(`[Worker] Today's city batch #${batchNum} (day ${dayOfYear}): ${batch.map(c => c.label).join(', ')}`);
-  return batch;
+  const todayCities = [...top5, ...todayExtra];
+  console.log(`[Worker] Today's ${todayCities.length} cities: ${todayCities.map(c => c.label).join(', ')}`);
+  return todayCities;
 }
 
 // Friday 5pm Weekly Lead Performance Report
@@ -542,9 +563,19 @@ export async function distributeDailyLeads(session = 'morning') {
 }
 
 if (!TEST_MODE) {
+  const SALES_LEADS_PAUSED = process.env.PAUSE_SALES_LEAD_DISTRIBUTION === 'true';
+  if (SALES_LEADS_PAUSED) {
+    console.log('[Worker] ⏸ Sales lead auto-distribution is PAUSED (PAUSE_SALES_LEAD_DISTRIBUTION=true)');
+    console.log('[Worker] Recruiting lead distribution is still running normally');
+  }
+
   // Morning distribution — 8:00 AM EST (= 1:00 PM UTC)
   const morningCron = process.env.MORNING_DISTRIBUTION_TIME || '0 13 * * *';
   cron.schedule(morningCron, async () => {
+    if (process.env.PAUSE_SALES_LEAD_DISTRIBUTION === 'true') {
+      console.log('[Worker] ⏸ Morning sales lead distribution skipped — paused by admin');
+      return;
+    }
     console.log('[Worker] ⏰ Morning lead distribution...');
     await distributeDailyLeads('morning').catch(err => {
       console.error('[Worker] Morning distribution error:', err.message);
@@ -555,6 +586,10 @@ if (!TEST_MODE) {
   // Midday top-up — 12:00 PM EST (= 5:00 PM UTC)
   const middayCron = process.env.MIDDAY_DISTRIBUTION_TIME || '0 17 * * *';
   cron.schedule(middayCron, async () => {
+    if (process.env.PAUSE_SALES_LEAD_DISTRIBUTION === 'true') {
+      console.log('[Worker] ⏸ Midday sales lead distribution skipped — paused by admin');
+      return;
+    }
     console.log('[Worker] ⏰ Midday lead top-up...');
     await distributeDailyLeads('midday').catch(err => {
       console.error('[Worker] Midday distribution error:', err.message);
@@ -673,6 +708,14 @@ if (!TEST_MODE) {
     });
   });
 
+  // Weekly Sunday midnight — clean old dedup entries
+  cron.schedule('0 0 * * 0', async () => {
+    console.log('[Worker] Weekly dedup cleanup running...');
+    await cleanOldDedupEntries(90).catch(err => {
+      console.error('[Worker] Dedup cleanup error:', err.message);
+    });
+  });
+
   // Morning resume distribution — 8:00 AM EST (= 1:00 PM UTC)
   cron.schedule(morningCron, async () => {
     console.log('[Worker] ⏰ Morning resume lead distribution starting...');
@@ -711,52 +754,41 @@ if (!TEST_MODE) {
 
 // ─── Resume Lead Distribution ─────────────────────────────────────────────────
 
-const DEMO_DESCRIPTION_PHRASES = [
-  'energetic sales professional based in',
-  'proven track record in outbound phone outreach and merchant communication',
-  'seeking cold calling, b2b sales, or appointment setting position',
-  'connecticut / hartford seeking cold calling',
-  'orlando, fl seeking cold calling',
-  'waveclosers-candidate.com',
-  'waveclosers.com',
-  'example.com',
-];
+function getKeywordsForToday() {
+  const allKeywords = RESUME_SEARCH_KEYWORDS;
+  const batchSize   = 15;
+  const dayOfYear   = Math.floor(
+    (new Date() - new Date(new Date().getFullYear(), 0, 0)) / 86400000
+  );
+  const startIndex = (dayOfYear * batchSize) % allKeywords.length;
+  const batch      = [];
 
-export function isDemoLead(lead) {
-  const desc  = (lead.description || '').toLowerCase();
-  const rawUrl = (lead.link || lead.craigslistUrl || lead.url || '').trim();
-  const url   = normalizeResumeURL(rawUrl);
-  const title = (lead.title || '').toLowerCase();
-
-  // Check for known demo phrases in description
-  if (DEMO_DESCRIPTION_PHRASES.some(phrase => desc.includes(phrase))) {
-    return true;
+  for (let i = 0; i < batchSize; i++) {
+    batch.push(allKeywords[(startIndex + i) % allKeywords.length]);
   }
 
-  // Check for fake URLs
-  if (!url.startsWith('https://') || url === '') return true;
-  if (!url.includes('craigslist.org')) return true;
-  if (!url.includes('/res/') && !url.includes('/view/d/')) return true;
-  if (url.includes('/search/')) return true; // search page not post
-
-
-  return false;
+  console.log(`[Worker] Today's keywords: ${batch.join(', ')}`);
+  return batch;
 }
 
-async function startupChecks() {
+async function createAgentNotification(agentEmail, agentName, leadCount, session) {
+  const base = getBase();
+  if (!base) return;
+
   try {
-    const dedupeSet = await getGlobalResumeDeduplicationSet();
-    console.log(`[Worker] Startup: ${dedupeSet.size} URLs in dedup registry`);
-
-    if (dedupeSet.size === 0) {
-      console.warn('[Worker] ⚠ Dedup registry is EMPTY — this may cause duplicates on first run');
-      console.warn('[Worker] ⚠ Verify ResumeDeduplicationRegistry table exists in Airtable');
-    }
+    await base('Notifications').create({
+      RecipientEmail: agentEmail,
+      Type:           'new_leads_assigned',
+      Title:          `${leadCount} new resume leads assigned to you`,
+      Message:        `Your ${session === 'morning' ? 'morning' : session === 'midday' ? 'midday' : 'daily'} recruiting leads are ready. You have ${leadCount} new candidate${leadCount !== 1 ? 's' : ''} to contact today. Open your Recruiting Pipeline tab to get started.`,
+      IsRead:         false,
+      CreatedAt:      new Date().toISOString(),
+    });
+    console.log(`[Notification] ✓ Created notification for ${agentName} — ${leadCount} leads`);
   } catch (err) {
-    console.error('[Worker] Startup check error:', err.message);
+    console.error(`[Notification] Failed to create for ${agentName}:`, err.message);
   }
 }
-startupChecks();
 
 export async function distributeResumeLeads() {
   const today = new Date().toISOString().split('T')[0];
@@ -765,94 +797,117 @@ export async function distributeResumeLeads() {
   const rawAgents = await getRecruitingAgents();
   const agents = (rawAgents || []).filter(a => a.name && isRealAgentName(a.name));
   if (!agents || agents.length === 0) {
-    console.error('[Worker] No real recruiting agents found for resume distribution');
+    console.error('[Worker] No recruiting agents found');
     return;
   }
-  console.log(`[Worker] ${agents.length} real recruiting agents found for resume distribution`);
 
-  // Load global dedup set FIRST before any API calls
+  if (!process.env.APIFY_API_KEY) {
+    console.error('[Worker] APIFY_API_KEY not set — aborting. Will NOT use demo data.');
+    await appendLog({
+      task:   'Resume distribution ABORTED',
+      target: 'APIFY_API_KEY missing from Railway environment variables',
+      status: 'error',
+    });
+    return; // hard stop — never fall back to demo data
+  }
+
+  const needed     = agents.length * DAILY_RESUME_LEADS_PER_WCR;
+  const fetchTarget = needed * 10; // fetch 10x buffer to survive dedup filtering
+
+  console.log(`[Worker] Need ${needed} leads for ${agents.length} agents. Will fetch up to ${fetchTarget} raw results.`);
+
+  // Load dedup registry
   const globalDedupeSet = await getGlobalResumeDeduplicationSet();
-  console.log(`[Worker] ${globalDedupeSet.size} URLs permanently locked in dedup registry`);
+  console.log(`[Worker] Dedup registry: ${globalDedupeSet.size} URLs locked`);
 
-  const keywordsList = (RESUME_SEARCH_KEYWORDS_LIST && RESUME_SEARCH_KEYWORDS_LIST.length)
-    ? RESUME_SEARCH_KEYWORDS_LIST
-    : [process.env.RESUME_SEARCH_KEYWORDS || 'sales'];
+  // Search keywords to rotate through (15 daily)
+  const todayKeywords = getKeywordsForToday();
 
-  // Use today's rotating batch of cities from the full USA list
-  const markets = getCitiesForToday();
-  const needed   = agents.length * DAILY_RESUME_LEADS_PER_WCR;
+  // Get today's cities from rotation
+  const todayCities = getCitiesForToday();
+  console.log(`[Worker] Today's cities: ${todayCities.map(c => c.label).join(', ')}`);
 
   let allFreshResumes = [];
-  
-  // Shuffle markets for even distribution across nationwide USA cities
-  const shuffledMarkets = [...markets].sort(() => Math.random() - 0.5);
+  const seenUrls = new Set();
 
-  for (const market of shuffledMarkets) {
-    if (allFreshResumes.length >= needed * 1.5) break;
+  // Loop cities AND keywords until we have enough
+  outerLoop:
+  for (const city of todayCities) {
+    for (const keyword of todayKeywords) {
+      if (allFreshResumes.length >= fetchTarget) break outerLoop;
 
-    for (const kw of keywordsList) {
-      if (allFreshResumes.length >= needed * 1.5) break;
       try {
-        console.log(`[Worker] Fetching resumes for ${market.label} (${market.slug}) kw="${kw}"...`);
-        const results = await fetchCraigslistResumesWithFallback(market.slug, kw, 30);
+        console.log(`[Worker] Fetching: "${keyword}" in ${city.label}...`);
+        const results = await fetchCraigslistResumesWithFallback(city.slug, keyword, 100);
 
-        // Filter against dedup set & demo lead check immediately
-        const fresh = results.filter(r => {
-          const url = normalizeResumeURL(r.link || '');
-          if (!url || globalDedupeSet.has(url)) return false;
+        let addedCount = 0;
+        for (const r of results) {
+          const url = normalizeResumeURL(r.link);
+
+          // Skip if no valid URL
+          if (!url || !url.startsWith('https://') || !url.includes('craigslist.org')) continue;
+
+          // Skip if demo data
           if (isDemoLead(r)) {
-            console.warn(`[Worker] Blocked demo/invalid lead: "${r.title}" — ${r.link}`);
-            return false;
+            console.warn(`[Worker] Blocked demo lead: ${url}`);
+            continue;
           }
-          return true;
-        });
 
-        console.log(`[Worker] ${market.label} ("${kw}"): ${results.length} fetched → ${fresh.length} fresh`);
-        allFreshResumes = [...allFreshResumes, ...fresh.map(r => ({ ...r, market: market.label }))];
+          // Skip if already in dedup registry
+          if (globalDedupeSet.has(url)) continue;
+
+          // Skip if already seen in this run
+          if (seenUrls.has(url)) continue;
+
+          seenUrls.add(url);
+          allFreshResumes.push({ ...r, link: url, market: city.label });
+          addedCount++;
+        }
+
+        console.log(`[Worker] "${keyword}" in ${city.label}: ${results.length} raw → ${addedCount} fresh added (total: ${allFreshResumes.length})`);
+
+        // Delay between requests
+        await new Promise(r => setTimeout(r, 1000));
+
       } catch (err) {
-        console.error(`[Worker] Resume fetch failed for ${market.label} ("${kw}"):`, err.message);
+        console.error(`[Worker] Failed "${keyword}" in ${city.label}:`, err.message);
+        // Continue to next keyword — do not stop entire distribution
       }
     }
   }
 
-  // Filter out any demo leads across entire collection
-  allFreshResumes = allFreshResumes.filter(r => {
-    if (isDemoLead(r)) {
-      console.warn(`[Worker] Blocked demo/invalid lead: "${r.title}" — ${r.link}`);
-      return false;
-    }
-    return true;
-  });
+  console.log(`[Worker] Total fresh real leads available: ${allFreshResumes.length}`);
 
-  console.log(`[Worker] After demo filter: ${allFreshResumes.length} valid real leads`);
-
-  // Remove duplicates within this batch itself by normalized URL
-  const seen = new Set();
-  allFreshResumes = allFreshResumes.filter(r => {
-    const url = normalizeResumeURL(r.link || '');
-    if (!url || seen.has(url)) return false;
-    seen.add(url);
-    return true;
-  });
-
-  console.log(`[Worker] Total fresh unique resumes available: ${allFreshResumes.length}`);
-
+  // Check if we have enough
   if (allFreshResumes.length === 0) {
-    console.error('[Worker] No fresh resumes found across all markets');
-    await appendLog({
-      task:   'Resume distribution — no fresh resumes',
-      target: 'All markets exhausted or Apify returned empty. Check Apify account.',
-      status: 'alert',
-    });
+    console.error('[Worker] POOL EXHAUSTED — zero real leads found across all cities and keywords');
+    if (globalDedupeSet.size > 500) {
+      await appendLog({
+        task:   'Distribution FAILED — dedup registry too large',
+        target: `Registry has ${globalDedupeSet.size} locked URLs filtering everything out. Run "Clear Old Dedup Entries" from admin panel or wait for Sunday auto-cleanup.`,
+        status: 'error',
+      });
+    } else {
+      await appendLog({
+        task:   'Distribution FAILED — no results from Apify',
+        target: 'Apify returned no results. Check Apify account has credits. Try running "Check Pool Status" from admin panel.',
+        status: 'error',
+      });
+    }
     return;
   }
 
   if (allFreshResumes.length < needed) {
-    console.warn(`[Worker] Only ${allFreshResumes.length} fresh resumes — need ${needed} for ${agents.length} agents`);
+    console.warn(`[Worker] LOW POOL — only ${allFreshResumes.length} leads for ${needed} needed`);
+    await appendLog({
+      task:   'Resume distribution — low pool warning',
+      target: `Only ${allFreshResumes.length} fresh leads available. ${needed} needed for ${agents.length} agents. Distributing what we have.`,
+      status: 'alert',
+    });
+    // Continue with what we have — do NOT abort
   }
 
-  // ROUND-ROBIN distribution — not sequential batching
-  // This ensures all agents get some leads even if pool is small
+  // ROUND-ROBIN distribution
   const buckets = {};
   agents.forEach(a => { buckets[a.name] = []; });
 
@@ -868,33 +923,34 @@ export async function distributeResumeLeads() {
     if (agents.every(a => buckets[a.name].length >= DAILY_RESUME_LEADS_PER_WCR)) break;
   }
 
-  // Save to Airtable + register in dedup registry
+  // Save to Airtable + register in dedup
   for (const agent of agents) {
     const batch = buckets[agent.name];
+
     if (batch.length === 0) {
       await appendLog({
-        task:   'Resume distribution skipped',
-        target: `${agent.name} — pool exhausted`,
+        task:   'Resume distribution — agent skipped',
+        target: `${agent.name} received 0 leads — pool exhausted before reaching this agent`,
         status: 'alert',
       });
+      console.warn(`[Worker] ${agent.name}: 0 leads — pool exhausted`);
       continue;
     }
 
     for (const resume of batch) {
-      const rawUrl = (resume.link || '').trim();
-      const normalizedUrl = normalizeResumeURL(rawUrl);
+      const url = normalizeResumeURL(resume.link);
 
-      if (isDemoLead({ ...resume, link: rawUrl })) {
-        console.warn(`[Worker] Blocked demo lead during save: ${resume.title}`);
+      // Final demo check before saving
+      if (isDemoLead(resume)) {
+        console.error(`[Worker] BLOCKED demo lead at save time: ${url}`);
         continue;
       }
 
-      // Save real resume to ResumeLeads table
       await saveResumeLead({
         title:         resume.title,
         description:   resume.description,
         phone:         resume.phone || '',
-        craigslistUrl: rawUrl,
+        craigslistUrl: url,
         market:        resume.market,
         assignedTo:    agent.name,
         assignedDate:  today,
@@ -902,23 +958,30 @@ export async function distributeResumeLeads() {
         source:        'apify',
       });
 
-      // Lock in dedup registry IMMEDIATELY
-      await registerResumeAsAssigned(normalizedUrl, agent.name, today);
+      await registerResumeAsAssigned(url, agent.name, today);
+      globalDedupeSet.add(url);
+    }
 
-      // Add to in-memory set to prevent cross-agent duplicates in this run
-      globalDedupeSet.add(normalizedUrl);
+    // Only AFTER successful save — create notification
+    if (batch.length > 0) {
+      await createAgentNotification(
+        agent.email,
+        agent.name,
+        batch.length,
+        'daily'
+      );
     }
 
     await appendLog({
       task:   'Real resume leads distributed',
-      target: `${agent.name} → ${batch.length} real Craigslist resumes from ${[...new Set(batch.map(l=>l.market))].join(', ')}`,
+      target: `${agent.name} → ${batch.length} real leads assigned`,
       status: 'ok',
     });
 
-    console.log(`[Worker] ✓ ${agent.name}: ${batch.length} real resumes assigned`);
+    console.log(`[Worker] ✓ ${agent.name}: ${batch.length} real leads assigned`);
   }
 
-  console.log('[Worker] Daily resume distribution complete — ALL REAL DATA from Apify');
+  console.log('[Worker] Distribution complete');
 }
 
 

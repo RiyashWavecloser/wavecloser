@@ -48,7 +48,7 @@ export default function AgentPortal({ currentUser, onLogout }) {
     wave_closer_recruiter: 'Recruiter Portal',
   }[currentUser?.role] || 'Agent Portal';
 
-  const isWCRecruiter = currentUser?.role === IS_RECRUITER_ROLE;
+  const isWCRecruiter = currentUser?.role === IS_RECRUITER_ROLE || currentUser?.role === 'agent';
 
   // Priority badge — only for Authorized Resellers
   const showPriorityBadge = currentUser?.role === 'authorized_reseller';
@@ -61,8 +61,8 @@ export default function AgentPortal({ currentUser, onLogout }) {
   const [toast, setToast] = useState(null);
   const [isDemo, setIsDemo] = useState(true);
   // 'assigned' | 'generate' | 'history' | 'resume-leads'
-  const [activeTab, setActiveTab] = useState(isWCRecruiter ? 'resume-leads' : 'assigned');
-  const [subPortal, setSubPortal] = useState('sales'); // 'sales' | 'recruiting'
+  const [subPortal, setSubPortal] = useState('recruiting'); // 'sales' | 'recruiting'
+  const [activeTab, setActiveTab] = useState(isSupervisor ? 'pipeline' : 'resume-leads');
 
   // Supervisor state
   const [supervisorAgent, setSupervisorAgent] = useState('all');
@@ -117,6 +117,7 @@ export default function AgentPortal({ currentUser, onLogout }) {
 
   useEffect(() => {
     loadMyLeads();
+    loadMyResumeLeads();
     const interval = setInterval(loadMyLeads, 15000);
     return () => clearInterval(interval);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -128,12 +129,12 @@ export default function AgentPortal({ currentUser, onLogout }) {
 
   // When Recruiting tab is opened — fetch today's resume leads for this agent
   useEffect(() => {
-    if (activeTab === 'recruiting') {
+    if (subPortal === 'recruiting' || activeTab === 'resume-leads' || activeTab === 'pipeline') {
       loadMyResumeLeads();
       const interval = setInterval(loadMyResumeLeads, 15000);
       return () => clearInterval(interval);
     }
-  }, [activeTab]);
+  }, [subPortal, activeTab]);
 
   async function loadMyResumeLeads() {
     const result = await fetchMyResumeLeads(); // calls GET /api/resume-leads/my-leads
@@ -152,18 +153,29 @@ export default function AgentPortal({ currentUser, onLogout }) {
       setNotifications(list);
       setUnreadCount(newUnread);
 
-      // If new unread notifications arrived while viewing, refresh leads automatically
-      if (newUnread > unreadCount && unreadCount > 0) {
-        showToast('🔔 You have new lead notifications!', 'info');
-        loadMyLeads();
-        loadMyResumeLeads();
+      // Show toast ONLY when new leads assigned notification arrives
+      // Never show toasts for errors or system messages
+      const assignmentNotifs = list.filter(
+        n => n.type === 'new_leads_assigned' && !n.isRead
+      );
+
+      if (assignmentNotifs.length > 0 && newUnread > 0) {
+        const newest = assignmentNotifs[0];
+        // Only show toast if this is a new notification (not already shown)
+        const notifKey = `shown-notif-${newest.id}`;
+        if (!sessionStorage.getItem(notifKey)) {
+          showToast(`🔔 ${newest.title}`, 'success');
+          sessionStorage.setItem(notifKey, 'true');
+          loadMyLeads();
+          loadMyResumeLeads();
+        }
       }
     }
-  }, [isSupervisor, unreadCount, loadMyLeads]);
+  }, [isSupervisor, loadMyLeads]);
 
   useEffect(() => {
     loadNotifications();
-    const interval = setInterval(loadNotifications, 10000); // Poll every 10 seconds
+    const interval = setInterval(loadNotifications, 15000); // Poll every 15 seconds
     return () => clearInterval(interval);
   }, [loadNotifications]);
 
@@ -629,7 +641,7 @@ export default function AgentPortal({ currentUser, onLogout }) {
           💼 Sales Leads
         </button>
         <button
-          onClick={() => { setSubPortal('recruiting'); setActiveTab('recruiting'); }}
+          onClick={() => { setSubPortal('recruiting'); setActiveTab(isSupervisor ? 'pipeline' : 'resume-leads'); }}
           style={{
             flex: 1,
             background: subPortal === 'recruiting' ? '#1F4E79' : 'transparent',
@@ -714,7 +726,7 @@ export default function AgentPortal({ currentUser, onLogout }) {
         </div>
       )}
 
-      {/* Tab bar */}
+      {/* Tab bar (Sales) */}
       <div style={S.tabBar}>
         <button
           id="tab-assigned" onClick={() => setActiveTab('assigned')}
@@ -736,24 +748,10 @@ export default function AgentPortal({ currentUser, onLogout }) {
         >
           📖 History{historyList.length > 0 ? ` (${historyList.length})` : ''}
         </button>
-        {/* Resume Leads tab — wave_closer_recruiter only */}
-        {isWCRecruiter && (
-          <button
-            id="tab-resume-leads" onClick={() => setActiveTab('resume-leads')}
-            style={{ ...S.tabBtn, ...(activeTab === 'resume-leads' ? S.tabBtnActive : {}) }}
-          >
-            📋 Resume Leads
-          </button>
-        )}
       </div>
 
-      {/* Tab: Generate My Own Leads */}
+      {/* Tab Contents (Sales) */}
       {activeTab === 'generate' && !isSupervisor && renderGenerateTab()}
-
-      {/* Tab: Resume Leads (wave_closer_recruiter) */}
-      {activeTab === 'resume-leads' && isWCRecruiter && (
-        <ResumeLeadsTab currentUser={currentUser} />
-      )}
 
       {/* Tab: History */}
       {activeTab === 'history' && (
@@ -829,16 +827,16 @@ export default function AgentPortal({ currentUser, onLogout }) {
           </div>
         </div>
       )}
-        </>
+    </>
+  ) : (
+    <div style={{ padding: '0 20px' }}>
+      {isSupervisor ? (
+        <RecruitingPipelineView currentUser={currentUser} />
       ) : (
-        <div style={{ padding: '0 20px' }}>
-          {isSupervisor ? (
-            <RecruitingPipelineView currentUser={currentUser} />
-          ) : (
-            <ResumeLeadsTab currentUser={currentUser} />
-          )}
-        </div>
+        <ResumeLeadsTab currentUser={currentUser} />
       )}
+    </div>
+  )}
 
       {/* Footer */}
       <div style={S.footer}>

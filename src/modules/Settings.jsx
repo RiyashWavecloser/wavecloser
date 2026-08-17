@@ -69,6 +69,28 @@ export default function Settings({ dataMode, setDataMode }) {
             <HealthRow label="Email (Resend)" ok={health.email}        yes="✓ Ready" no="✗ No key — emails log to console" />
             <HealthRow label="Google Places"  ok={health.googlePlaces} yes="✓ Key set" no="✗ No key — lead gen uses demo data" />
             <HealthRow label="Yelp Fusion"    ok={health.yelp}         yes="✓ Key set" no="✗ No key — Yelp backup disabled" />
+
+            <div style={{ marginTop: 10 }}>
+              <div style={{
+                padding: '10px 14px', borderRadius: 8, marginTop: 8,
+                background: health.salesLeadsPaused ? '#FEF8EC' : '#EAFAF1',
+                color: health.salesLeadsPaused ? '#8A6210' : '#1A6B3F',
+                fontSize: 13,
+                fontWeight: 500,
+              }}>
+                {health.salesLeadsPaused
+                  ? '⏸ Sales lead auto-distribution is currently PAUSED'
+                  : '▶ Sales lead auto-distribution is running'}
+              </div>
+              <div style={{
+                padding: '10px 14px', borderRadius: 8, marginTop: 6,
+                background: '#EAFAF1', color: '#1A6B3F', fontSize: 13,
+                fontWeight: 500,
+              }}>
+                ✅ Recruiting lead distribution is always active
+              </div>
+            </div>
+
             <div style={s.healthTs}>
               {health.status === 'offline' ? 'Server is offline. Run: node server/claude-proxy.js' : `Checked at ${new Date().toLocaleTimeString()}`}
             </div>

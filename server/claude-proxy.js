@@ -56,7 +56,6 @@ import {
   // Resume Lead Distribution (Workflow C)
   getRecruitingAgents,
   getGlobalResumeDeduplicationSet,
-  normalizeResumeURL,
   getBase,
   getResumeLeadsByAgent,
   getResumeLeadsByAgent as getResumeLeadsByRecruiter,
@@ -75,6 +74,7 @@ import {
   // Notifications (Req 4)
   createNotification,
   fetchNotifications,
+  getAgentNotifications,
   markNotificationsRead,
   markNotificationRead,
   isRealAgentName,
@@ -93,7 +93,15 @@ import {
   buildPartnerLeadEmail,
 } from './emailService.js';
 import { requireAuth, signToken, verifyPassword, hashPassword, requireRole, authenticateAgent, authenticateSupervisor } from './auth.js';
-import { AGENTS, CITY_SUBDOMAINS, DAILY_RESUME_LEADS_PER_WCR, RESUME_SEARCH_KEYWORDS, RESUME_SEARCH_KEYWORDS_LIST } from './constants.js';
+import {
+  AGENTS,
+  CITY_SUBDOMAINS,
+  DAILY_RESUME_LEADS_PER_WCR,
+  RESUME_SEARCH_KEYWORDS,
+  RESUME_SEARCH_KEYWORDS_LIST,
+  isDemoLead,
+  normalizeResumeURL,
+} from './constants.js';
 
 dotenv.config();
 
@@ -374,13 +382,16 @@ app.get('/', (req, res) => {
 
 app.get('/health', (_req, res) => {
   res.json({
-    status:       'ok',
-    time:         new Date().toISOString(),
-    claude:       !!ANTHROPIC_KEY,
-    airtable:     airtableReady(),
-    email:        emailReady(),
-    googlePlaces: !!process.env.GOOGLE_PLACES_API_KEY,
-    yelp:         !!process.env.YELP_API_KEY,
+    status:                'ok',
+    time:                  new Date().toISOString(),
+    claude:                !!ANTHROPIC_KEY,
+    airtable:              airtableReady(),
+    email:                 emailReady(),
+    googlePlaces:          !!process.env.GOOGLE_PLACES_API_KEY,
+    yelp:                  !!process.env.YELP_API_KEY,
+    apify:                 !!process.env.APIFY_API_KEY,
+    salesLeadsPaused:      process.env.PAUSE_SALES_LEAD_DISTRIBUTION === 'true',
+    recruitingLeadsActive: true,
   });
 });
 
@@ -664,17 +675,7 @@ app.post('/api/resume-leads/purge-demo-data', requireAuth, async (req, res) => {
   }
 });
 
-// Also add resume-leads distribute-now route that was accidentally removed
-app.post('/api/resume-leads/distribute-now', async (req, res) => {
-  try {
-    console.log('[proxy] Triggering daily resume lead distribution now...');
-    await distributeResumeLeads();
-    res.json({ success: true, message: 'Resume lead distribution triggered successfully' });
-  } catch (err) {
-    console.error('[proxy] POST /api/resume-leads/distribute-now error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+
 
 
 
@@ -996,7 +997,8 @@ const requireResumeAdmin = (req, res, next) =>
 app.get('/api/recruiting', requireRecruiterAccess, async (req, res) => {
   try {
     const { role, name } = req.user;
-    const recruiterName = role === 'recruiter' ? name : null; // admin/pm see all
+    const isSpecialAdmin = ['admin', 'pm', 'sponsor', 'agent_supervisor'].includes(role);
+    const recruiterName = isSpecialAdmin ? null : name;
     const recruits = await getRecruitingPipeline(recruiterName);
     res.json(recruits);
   } catch (err) {
@@ -1281,7 +1283,9 @@ async function fetchViaCLSAPI(citySlug, keywords, limit = 50) {
       const title    = String(item[8] || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').trim();
       const pathSlug = Array.isArray(item[7]) ? item[7][1] : String(item[7] || '');
       const postingId = item[0];
-      const link     = `https://www.craigslist.org/res/${pathSlug}.html`;
+      const link     = pathSlug && postingId
+        ? `https://www.craigslist.org/view/d/${pathSlug}/${postingId}`
+        : `https://${citySlug}.craigslist.org/search/res`;
       return { title, link, postingId, description: '', phone: '', email: '', date: '', source: 'cl-sapi', market: citySlug };
     })
     .filter(item => item.title && item.link && !item.link.includes('waveclosers.com'))
@@ -1443,10 +1447,12 @@ app.post('/api/resume-leads/distribute-now', requireAuth, async (req, res) => {
 
   try {
     console.log(`[Manual Distribution] Triggered by ${req.user.email}`);
-    await distributeResumeLeads(); // same real function as the cron job
+    distributeResumeLeads().catch(err => {
+      console.error('[Manual Distribution] Async error:', err.message);
+    });
     res.json({
       success: true,
-      message: 'Distribution complete — real Craigslist resumes assigned via Apify',
+      message: 'Resume lead distribution triggered in background — real Craigslist resumes will be assigned',
     });
   } catch (err) {
     console.error('[Manual Distribution] Error:', err.message);
@@ -1630,6 +1636,117 @@ app.post('/api/resume-leads/purge-all-demo', requireAuth, handlePurgeAllDemo);
 app.post('/api/resume-leads/purge-demo-data', requireAuth, handlePurgeAllDemo);
 
 
+// POST /api/resume-leads/clear-recent-dedup
+// Admin only — clears last N days from ResumeDeduplicationRegistry
+// This allows recent real Craigslist leads to be reassigned
+app.post('/api/resume-leads/clear-recent-dedup', requireAuth, async (req, res) => {
+  if (!['admin', 'pm'].includes(req.user?.role)) {
+    return res.status(403).json({ error: 'Admin or PM only' });
+  }
+
+  const days = Math.min(30, Math.max(1, parseInt(req.body?.days) || 10));
+  const base = getBase();
+
+  if (!base) {
+    return res.status(500).json({ error: 'Airtable not configured' });
+  }
+
+  try {
+    // Calculate cutoff date — delete entries NEWER than this
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    const cutoffStr = cutoff.toISOString();
+
+    console.log(`[DedupClear] Clearing registry entries from last ${days} days (after ${cutoffStr})...`);
+
+    // Fetch all entries newer than cutoff
+    const recentRecords = await base('ResumeDeduplicationRegistry')
+      .select({
+        filterByFormula: `IS_AFTER({FirstSeenAt}, "${cutoffStr}")`,
+      })
+      .all();
+
+    console.log(`[DedupClear] Found ${recentRecords.length} entries from last ${days} days`);
+
+    if (recentRecords.length === 0) {
+      return res.json({
+        success: true,
+        deleted: 0,
+        days,
+        message: `No entries found from last ${days} days — registry may already be clear`,
+      });
+    }
+
+    // Delete in batches of 10 (Airtable limit)
+    const ids = recentRecords.map(r => r.id);
+    let deleted = 0;
+
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await base('ResumeDeduplicationRegistry').destroy(batch);
+      deleted += batch.length;
+      console.log(`[DedupClear] Deleted ${deleted}/${ids.length}...`);
+    }
+
+    // Also delete the corresponding ResumeLeads records for these agents
+    // so agents get a clean fresh batch — not duplicated in their list
+    const assignedTos  = [...new Set(recentRecords.map(r => r.get('AssignedTo')).filter(Boolean))];
+    const assignedDates = [...new Set(recentRecords.map(r => r.get('AssignedDate')).filter(Boolean))];
+    console.log(`[DedupClear] Clearing registry entries for agents: ${assignedTos.join(', ')} on dates: ${assignedDates.join(', ')}`);
+
+    // Count existing ResumeLeads that will now be unlocked
+    const unlockedCount = recentRecords.length;
+
+    // Delete corresponding ResumeLeads records by CraigslistURL
+    const urls = recentRecords.map(r => r.get('CraigslistURL')).filter(Boolean);
+    let leadsDeleted = 0;
+    if (urls.length > 0) {
+      const leadRecords = [];
+      const urlBatchSize = 50;
+      for (let i = 0; i < urls.length; i += urlBatchSize) {
+        const urlBatch = urls.slice(i, i + urlBatchSize);
+        const formula = `OR(${urlBatch.map(url => `{CraigslistURL} = "${url}"`).join(',')})`;
+        const batchRecords = await base('ResumeLeads').select({
+          filterByFormula: formula,
+        }).all();
+        leadRecords.push(...batchRecords);
+      }
+
+      if (leadRecords.length > 0) {
+        const leadIds = leadRecords.map(r => r.id);
+        for (let i = 0; i < leadIds.length; i += 10) {
+          const batch = leadIds.slice(i, i + 10);
+          await base('ResumeLeads').destroy(batch);
+          leadsDeleted += batch.length;
+        }
+        console.log(`[DedupClear] Deleted ${leadsDeleted} corresponding ResumeLeads records`);
+      }
+    }
+
+    await appendLog({
+      task:   'Dedup registry cleared',
+      target: `${deleted} entries from last ${days} days removed — ${unlockedCount} real Craigslist leads unlocked for reassignment`,
+      status: 'ok',
+    });
+
+    console.log(`[DedupClear] ✓ Complete — ${deleted} entries deleted, ${unlockedCount} real leads unlocked`);
+
+    res.json({
+      success:       true,
+      deleted,
+      days,
+      unlockedLeads: unlockedCount,
+      message:       `✓ Cleared ${deleted} dedup entries from last ${days} days. ${unlockedCount} real Craigslist leads are now unlocked and will be reassigned in the next distribution run.`,
+    });
+
+  } catch (err) {
+    console.error('[DedupClear] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+
 
 
 /**
@@ -1665,6 +1782,56 @@ app.get('/api/resume-leads/recruiting-agents', requireResumeAdmin, async (req, r
     res.json({ agents });
   } catch (err) {
     console.error('[proxy] GET /api/resume-leads/recruiting-agents:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/resume-leads/pool-status
+// Admin/PM can check this to diagnose pool exhaustion
+app.get('/api/resume-leads/pool-status', requireAuth, async (req, res) => {
+  if (!['admin', 'pm'].includes(req.user?.role)) {
+    return res.status(403).json({ error: 'Admin or PM only' });
+  }
+
+  try {
+    const dedupeSet    = await getGlobalResumeDeduplicationSet();
+    const rawAgents    = await getRecruitingAgents();
+    const agents       = (rawAgents || []).filter(a => a.name && isRealAgentName(a.name));
+    const needed       = agents.length * (parseInt(process.env.DAILY_RESUME_LEADS_PER_WCR) || 100);
+    const apifyReady   = !!process.env.APIFY_API_KEY;
+
+    // Test fetch from one city to see how many raw results are available
+    let testResults = [];
+    if (apifyReady) {
+      try {
+        testResults = await fetchViaApify('newyork', 'sales commission', 50);
+      } catch (e) {
+        testResults = [];
+      }
+    }
+
+    const freshTestCount = testResults.filter(r =>
+      !dedupeSet.has(normalizeResumeURL(r.link)) && !isDemoLead(r)
+    ).length;
+
+    res.json({
+      apifyConfigured:    apifyReady,
+      dedupeRegistrySize: dedupeSet.size,
+      agentCount:         agents.length,
+      dailyLeadsNeeded:   needed,
+      testCity:           'New York, NY',
+      testRawResults:     testResults.length,
+      testFreshResults:   freshTestCount,
+      diagnosis: !apifyReady
+        ? 'APIFY_API_KEY not set in Railway — add it immediately'
+        : testResults.length === 0
+        ? 'Apify returned 0 results — check Apify account and actor status'
+        : freshTestCount === 0
+        ? `All ${testResults.length} results were already in dedup registry (${dedupeSet.size} locked). Try clearing old dedup entries or searching different cities.`
+        : `Pool looks healthy — ${freshTestCount} fresh leads available from New York alone`,
+    });
+  } catch (err) {
+    console.error('[proxy] GET /api/resume-leads/pool-status error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1762,10 +1929,10 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
     // Step 2 — Load global dedup set
     const globalDedupeSet = await getGlobalResumeDeduplicationSet();
 
-    // Step 3 — Filter out already-assigned resumes
+    // Step 3 — Filter out already-assigned resumes and demo leads
     const freshResumes = allResults.filter(r => {
-      const url = (r.link || '').trim().toLowerCase();
-      return url && !globalDedupeSet.has(url);
+      const url = normalizeResumeURL(r.link || '');
+      return url && !globalDedupeSet.has(url) && !isDemoLead(r);
     });
 
     const perCityFreshBreakdown = {};
@@ -1820,7 +1987,11 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
 
       for (const resume of batch) {
         const rawUrl = (resume.link || resume.craigslistUrl || resume.url || '').trim();
-        const urlForDedup = rawUrl.toLowerCase();
+        const urlForDedup = normalizeResumeURL(rawUrl);
+        if (isDemoLead(resume)) {
+          console.warn(`[BulkAssign] BLOCKED demo lead at save time: ${rawUrl}`);
+          continue;
+        }
         await saveResumeLead({
           title:         resume.title,
           description:   resume.description,
@@ -1918,11 +2089,11 @@ app.post('/api/resume-leads/agent-self-search', requireResumeAccess, async (req,
       });
     }
 
-    // 2 — Filter already-assigned resumes
+    // 2 — Filter already-assigned resumes and demo leads
     const globalDedupeSet = await getGlobalResumeDeduplicationSet();
     const freshResumes = allResults.filter(r => {
-      const url = (r.link || '').trim().toLowerCase();
-      return url && !globalDedupeSet.has(url);
+      const url = normalizeResumeURL(r.link || '');
+      return url && !globalDedupeSet.has(url) && !isDemoLead(r);
     }).slice(0, fetchLimit);
 
     console.log(`[AgentSelfSearch] ${allResults.length} found → ${freshResumes.length} fresh → will assign ${Math.min(freshResumes.length, fetchLimit)}`);
@@ -1940,7 +2111,12 @@ app.post('/api/resume-leads/agent-self-search', requireResumeAccess, async (req,
     const savedLeads = [];
     for (const resume of freshResumes) {
       const rawUrl      = (resume.link || resume.craigslistUrl || resume.url || '').trim();
-      const urlForDedup = rawUrl.toLowerCase();
+      const urlForDedup = normalizeResumeURL(rawUrl);
+
+      if (isDemoLead(resume)) {
+        console.warn(`[AgentSelfSearch] BLOCKED demo lead at save time: ${rawUrl}`);
+        continue;
+      }
 
       await saveResumeLead({
         title:         resume.title,
@@ -1997,14 +2173,26 @@ app.post('/api/resume-leads/agent-self-search', requireResumeAccess, async (req,
  * Returns the calling agent's notifications (last 50), newest first.
  */
 app.get('/api/notifications/my', requireAuth, async (req, res) => {
-  const email = req.user.email;
   if (!airtableReady()) return res.json({ notifications: [], unreadCount: 0, demo: true });
   try {
-    const result = await fetchNotifications(email);
-    res.json({ ...result, demo: false });
+    const notifications = await getAgentNotifications(req.user.email, false);
+
+    // Filter to only success/assignment notifications
+    // Never send error or system notifications to agents
+    const agentNotifications = (notifications || []).filter(n =>
+      n.type === 'new_leads_assigned' || n.type === 'callback_due'
+    );
+
+    const unreadCount = agentNotifications.filter(n => !n.isRead).length;
+
+    res.json({
+      notifications: agentNotifications,
+      unreadCount,
+      demo: false,
+    });
   } catch (err) {
     console.error('[proxy] GET /api/notifications/my:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, notifications: [], unreadCount: 0 });
   }
 });
 

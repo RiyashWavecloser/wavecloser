@@ -138,9 +138,8 @@ export async function fetchViaCLSAPI(citySlug, keywords, limit = 50) {
       const pathSlug    = Array.isArray(item[7]) ? item[7][1] : String(item[7] || '');
       const postingHash = Array.isArray(item[6]) ? item[6][1] : String(item[6] || item[0] || '');
 
-      // Real Craigslist post URL format: https://www.craigslist.org/view/d/{slug}/{hash}
-      // Or fallback if pathSlug/postingHash missing
-      const link = (pathSlug && postingHash)
+      // Real Craigslist post URL format: https://www.craigslist.org/view/d/{pathSlug}/{postingHash}
+      const link = pathSlug && postingHash
         ? `https://www.craigslist.org/view/d/${pathSlug}/${postingHash}`
         : `https://${citySlug}.craigslist.org/search/res`;
 

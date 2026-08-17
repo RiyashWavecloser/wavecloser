@@ -14,7 +14,7 @@
 import Airtable from 'airtable';
 import dotenv from 'dotenv';
 import { sendEmail, buildRecruiterLeadEmail } from './emailService.js';
-import { RECRUITING_AGENTS, AGENTS } from './constants.js';
+import { RECRUITING_AGENTS, AGENTS, normalizeResumeURL, isDemoLead } from './constants.js';
 dotenv.config();
 
 const API_KEY = process.env.AIRTABLE_API_KEY;
@@ -1420,19 +1420,6 @@ export async function getRecruitingAgents() {
   return RECRUITING_AGENTS;
 }
 
-
-/**
- * Single normalization function used EVERYWHERE for resume URLs.
- */
-export function normalizeResumeURL(url) {
-  return (url || '')
-    .trim()
-    .toLowerCase()
-    .replace(/\/$/, '')     // remove trailing slash
-    .replace(/\?.*$/, '')   // remove query parameters
-    .replace(/#.*$/, '');   // remove hash fragments
-}
-
 /**
  * Fetch all CraigslistURLs ever assigned — returns a Set.
  * This is the global permanent dedup registry. Check BEFORE assigning any resume.
@@ -1487,6 +1474,47 @@ export async function registerResumeAsAssigned(url, assignedTo, assignedDate) {
     );
   } catch (err) {
     console.warn(`[Dedup] Could not register ${normalizedUrl}: ${err.message}`);
+  }
+}
+
+/**
+ * Clean up old entries from the deduplication registry.
+ */
+export async function cleanOldDedupEntries(keepDays) {
+  if (!isConfigured()) return 0;
+  try {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - keepDays);
+
+    const oldRecords = await retry(() =>
+      base()('ResumeDeduplicationRegistry')
+        .select({
+          filterByFormula: `IS_BEFORE({FirstSeenAt}, "${cutoff.toISOString()}")`,
+        })
+        .all()
+    );
+
+    if (oldRecords.length === 0) {
+      console.log('[Worker] Dedup cleanup: no old entries found');
+      return 0;
+    }
+
+    const ids = oldRecords.map(r => r.id);
+    for (let i = 0; i < ids.length; i += 10) {
+      const batch = ids.slice(i, i + 10);
+      await retry(() => base()('ResumeDeduplicationRegistry').destroy(batch));
+    }
+
+    console.log(`[Worker] Dedup cleanup: deleted ${ids.length} entries older than ${keepDays} days`);
+    await appendLog({
+      task:   'Dedup registry cleanup',
+      target: `Removed ${ids.length} entries older than ${keepDays} days — pool refreshed`,
+      status: 'ok',
+    });
+    return ids.length;
+  } catch (err) {
+    console.error('[Worker] Dedup cleanup error:', err.message);
+    throw err;
   }
 }
 
@@ -2047,14 +2075,14 @@ export async function bulkAssignResumeLeads(resumes, agentName, market) {
   }
   const today = new Date().toISOString().slice(0, 10);
 
-
   const globalDedupeSet = await getGlobalResumeDeduplicationSet();
   let assigned = 0;
   let skipped  = 0;
 
   for (const resume of resumes) {
     const rawUrl = (resume.link || resume.craigslistUrl || resume.url || '').trim();
-    if (!rawUrl || globalDedupeSet.has(rawUrl.toLowerCase())) {
+    const urlForDedup = normalizeResumeURL(rawUrl);
+    if (!urlForDedup || globalDedupeSet.has(urlForDedup) || isDemoLead(resume)) {
       skipped++;
       continue;
     }
@@ -2071,7 +2099,7 @@ export async function bulkAssignResumeLeads(resumes, agentName, market) {
     });
 
     await registerResumeAsAssigned(rawUrl, agentName, today);
-    globalDedupeSet.add(rawUrl.toLowerCase());
+    globalDedupeSet.add(urlForDedup);
     assigned++;
   }
 
@@ -2221,6 +2249,15 @@ export async function fetchNotifications(recipientEmail) {
     console.warn('[airtable] fetchNotifications error:', err.message);
     return { notifications: [], unreadCount: 0 };
   }
+}
+
+export async function getAgentNotifications(agentEmail, unreadOnly = false) {
+  const result = await fetchNotifications(agentEmail);
+  let notifs = result.notifications || [];
+  if (unreadOnly) {
+    notifs = notifs.filter(n => !n.isRead);
+  }
+  return notifs;
 }
 
 /**

@@ -102,28 +102,109 @@ export const LEAD_STATUSES = [
 /**
  * Number of Craigslist resume leads assigned to each recruiting agent per day.
  */
-export const DAILY_RESUME_LEADS_PER_WCR = Number(process.env.DAILY_RESUME_LEADS_PER_WCR || 20);
+export const DAILY_RESUME_LEADS_PER_WCR = Number(process.env.DAILY_RESUME_LEADS_PER_WCR || 100);
 
-/**
- * Default Craigslist resume search keywords.
- */
-export const RESUME_SEARCH_KEYWORDS = process.env.RESUME_SEARCH_KEYWORDS || 'sales';
-
-/**
- * Multi-keyword list for automatic Craigslist resume volume generation.
- */
-export const RESUME_SEARCH_KEYWORDS_LIST = [
+export const RESUME_SEARCH_KEYWORDS = [
+  // Direct sales roles
   'sales',
+  'sales rep',
+  'sales representative',
+  'sales associate',
+  'sales agent',
+  'sales consultant',
+  'sales executive',
+  'sales professional',
+  'sales manager',
+  'sales coordinator',
+
+  // Commission based
   'commission sales',
+  'commission only',
+  'commission based',
+  'base plus commission',
+  'residual income',
+  'residual sales',
+
+  // Outbound/calling roles
   'cold calling',
+  'cold caller',
+  'outbound sales',
+  'outbound calling',
+  'outbound calls',
   'telemarketing',
-  'customer service',
+  'telesales',
+  'phone sales',
   'inside sales',
+
+  // Field sales
   'outside sales',
-  'account executive',
+  'field sales',
+  'door to door sales',
+  'door to door',
+  'direct sales',
+  'direct marketing',
+
+  // Business development
   'business development',
+  'business development rep',
+  'BDR',
+  'SDR',
+  'sales development',
+  'account executive',
+  'account manager',
+  'account representative',
+
+  // Closing roles
+  'closer',
+  'sales closer',
+  'high ticket closer',
   'appointment setter',
+  'appointment setting',
+
+  // Payment and merchant specific
+  'payment processing sales',
+  'merchant services',
+  'merchant sales',
+  'POS sales',
+  'point of sale sales',
+  'fintech sales',
+  'financial sales',
+
+  // B2B specific
+  'B2B sales',
+  'B2B representative',
+  'business to business',
+  'small business sales',
+  'SMB sales',
+
+  // General looking for work
+  'seeking sales position',
+  'sales experience',
+  'sales background',
+  'sales motivated',
+  'self motivated sales',
+  'results driven sales',
+  'goal oriented sales',
+
+  // Entry level and experienced
+  'entry level sales',
+  'junior sales',
+  'senior sales',
+  'experienced sales',
+  'sales professional available',
+  'sales talent',
+  'motivated sales',
+
+  // Referral and partner roles
+  'referral partner',
+  'affiliate sales',
+  'reseller',
+  'independent contractor sales',
+  'freelance sales',
+  '1099 sales',
 ];
+
+export const RESUME_SEARCH_KEYWORDS_LIST = RESUME_SEARCH_KEYWORDS;
 
 /**
  * Staff roles that receive daily resume leads.
@@ -562,3 +643,86 @@ export const ROTATING_USA_CITIES = ALL_USA_CRAIGSLIST_CITIES.map(c => c.slug);
  * Complete nationwide major USA cities for automated business lead generation.
  */
 export const ALL_USA_BUSINESS_MARKETS = ALL_USA_CRAIGSLIST_CITIES.map(c => c.label);
+
+export const HIGH_VOLUME_CITIES = [
+  { label: 'New York City, NY',    slug: 'newyork'       },
+  { label: 'Los Angeles, CA',      slug: 'losangeles'    },
+  { label: 'Chicago, IL',          slug: 'chicago'       },
+  { label: 'Houston, TX',          slug: 'houston'       },
+  { label: 'Phoenix, AZ',          slug: 'phoenix'       },
+  { label: 'Philadelphia, PA',     slug: 'philadelphia'  },
+  { label: 'San Antonio, TX',      slug: 'sanantonio'    },
+  { label: 'San Diego, CA',        slug: 'sandiego'      },
+  { label: 'Dallas, TX',           slug: 'dallas'        },
+  { label: 'San Francisco, CA',    slug: 'sfbay'         },
+  { label: 'Seattle, WA',          slug: 'seattle'       },
+  { label: 'Denver, CO',           slug: 'denver'        },
+  { label: 'Boston, MA',           slug: 'boston'        },
+  { label: 'Miami, FL',            slug: 'miami'         },
+  { label: 'Atlanta, GA',          slug: 'atlanta'       },
+  { label: 'Minneapolis, MN',      slug: 'minneapolis'   },
+  { label: 'Portland, OR',         slug: 'portland'      },
+  { label: 'Las Vegas, NV',        slug: 'lasvegas'      },
+  { label: 'Detroit, MI',          slug: 'detroit'       },
+  { label: 'New Jersey',           slug: 'newjersey'     },
+  { label: 'Long Island, NY',      slug: 'longisland'    },
+  { label: 'Sacramento, CA',       slug: 'sacramento'    },
+  { label: 'Pittsburgh, PA',       slug: 'pittsburgh'    },
+  { label: 'Orlando, FL',          slug: 'orlando'       },
+  { label: 'Tampa, FL',            slug: 'tampa'         },
+  { label: 'Charlotte, NC',        slug: 'charlotte'     },
+  { label: 'Raleigh, NC',          slug: 'raleigh'       },
+  { label: 'Nashville, TN',        slug: 'nashville'     },
+  { label: 'Austin, TX',           slug: 'austin'        },
+  { label: 'Indianapolis, IN',     slug: 'indianapolis'  },
+];
+
+export const DEMO_PHRASES = [
+  'energetic sales professional based in',
+  'proven track record in outbound phone outreach and merchant communication',
+  'seeking cold calling, b2b sales, or appointment setting position',
+  'connecticut / hartford seeking cold calling',
+  'orlando, fl seeking cold calling',
+  'waveclosers-candidate.com',
+  'waveclosers.com',
+  '@waveclosers',
+  'example.com',
+  'test lead',
+  'demo lead',
+  'sample resume',
+  'lorem ipsum',
+];
+
+export function normalizeResumeURL(url) {
+  return (url || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\/$/, '')
+    .replace(/\?.*$/, '')
+    .replace(/#.*$/, '');
+}
+
+export function isDemoLead(lead) {
+  const desc  = (lead.description || lead.postingBody || '').toLowerCase();
+  const url   = normalizeResumeURL(lead.link || lead.url || lead.craigslistUrl || '');
+  const title = (lead.title || '').toLowerCase();
+
+  // Check description for demo phrases
+  if (DEMO_PHRASES.some(phrase => desc.includes(phrase))) return true;
+
+  // Check title for demo phrases
+  if (DEMO_PHRASES.some(phrase => title.includes(phrase))) return true;
+
+  // Check URL validity
+  if (!url) return true;
+  if (!url.startsWith('https://')) return true;
+  if (!url.includes('craigslist.org')) return true;
+  if (url.includes('/search/res')) return true; // search page not post
+  if (!url.includes('.html')) return true; // post URLs always end in .html
+
+  // Check for fake domain in URL
+  if (DEMO_PHRASES.some(phrase => url.includes(phrase))) return true;
+
+  return false;
+}
+
