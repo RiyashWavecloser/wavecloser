@@ -105,40 +105,42 @@ export const LEAD_STATUSES = [
 export const DAILY_RESUME_LEADS_PER_WCR = Number(process.env.DAILY_RESUME_LEADS_PER_WCR || 100);
 
 export const RESUME_SEARCH_KEYWORDS = [
-  // Direct sales roles
-  'sales',
-  'sales rep',
-  'sales representative',
-  'sales associate',
-  'sales agent',
-  'sales consultant',
-  'sales executive',
-  'sales professional',
-  'sales manager',
-  'sales coordinator',
+  // User Requested Core Keywords
+  'Sales',
+  'Sales experience',
+  'Motivated individuals',
+  'Goal-oriented',
+  'Results-driven',
+  'Prospective clients',
+  'Client relationships',
+  'Build lasting relationships',
+  'Business development',
+  'Professional growth',
+  'Earning potential',
+  'Commission-only',
+  'Competitive compensation',
+  'Marketing',
+  'Sales opportunities',
+  'Jobs',
+  'Customer representative',
+  'Sales Representative',
 
-  // Commission based
-  'commission sales',
-  'commission only',
-  'commission based',
-  'base plus commission',
-  'residual income',
-  'residual sales',
-
-  // Outbound/calling roles
+  // Outbound & Telemarketing
   'cold calling',
   'cold caller',
   'outbound sales',
   'outbound calling',
-  'outbound calls',
   'telemarketing',
   'telesales',
   'phone sales',
   'inside sales',
-
-  // Field sales
   'outside sales',
-  'field sales',
+  'direct sales',
+  'direct marketing',
+  'appointment setter',
+  'appointment setting',
+  'sales closer',
+  'high ticket closer',
   'door to door sales',
   'door to door',
   'direct sales',
