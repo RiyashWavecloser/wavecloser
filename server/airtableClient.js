@@ -1424,16 +1424,22 @@ export async function getRecruitingAgents() {
  * Fetch all CraigslistURLs ever assigned — returns a Set.
  * This is the global permanent dedup registry. Check BEFORE assigning any resume.
  */
-export async function getGlobalResumeDeduplicationSet() {
+export async function getGlobalResumeDeduplicationSet(daysToKeep = 1) {
   if (!isConfigured()) {
     console.warn('[Dedup] Airtable not configured — dedup disabled');
     return new Set();
   }
 
   try {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - daysToKeep);
+
     const records = await retry(() =>
       base()('ResumeDeduplicationRegistry')
-        .select({ fields: ['CraigslistURL'] })
+        .select({
+          fields: ['CraigslistURL', 'FirstSeenAt'],
+          filterByFormula: `OR(IS_AFTER({FirstSeenAt}, "${cutoff.toISOString()}"), {FirstSeenAt} = "")`
+        })
         .all()
     );
 
@@ -1443,13 +1449,25 @@ export async function getGlobalResumeDeduplicationSet() {
       if (url) set.add(url);
     });
 
-    console.log(`[Dedup] Registry loaded: ${set.size} URLs locked`);
+    console.log(`[Dedup] Registry loaded: ${set.size} URLs locked (last ${daysToKeep} day(s))`);
     return set;
   } catch (err) {
-    console.error('[Dedup] ResumeDeduplicationRegistry table error:', err.message);
-    console.error('[Dedup] ⚠ CREATE THIS TABLE IN AIRTABLE: ResumeDeduplicationRegistry');
-    console.error('[Dedup] Fields needed: CraigslistURL (text), FirstSeenAt (datetime), AssignedTo (text), AssignedDate (date)');
-    return new Set();
+    try {
+      const records = await retry(() =>
+        base()('ResumeDeduplicationRegistry')
+          .select({ fields: ['CraigslistURL'] })
+          .all()
+      );
+      const set = new Set();
+      records.forEach(r => {
+        const url = normalizeResumeURL(r.get('CraigslistURL'));
+        if (url) set.add(url);
+      });
+      return set;
+    } catch (e) {
+      console.error('[Dedup] ResumeDeduplicationRegistry error:', e.message);
+      return new Set();
+    }
   }
 }
 
