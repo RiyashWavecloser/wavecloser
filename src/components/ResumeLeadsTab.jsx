@@ -11,8 +11,8 @@
  * All leads are globally deduplicated on the server — agents only ever see fresh candidates.
  */
 
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { fetchMyResumeLeads, updateResumeLeadAPI, agentSelfSearchAndClaim } from '../lib/dataLayer.js';
+import { cleanCraigslistUrl } from '../data/constants.js';
 
 const STATUS_COLORS = {
   New:           { bg: '#F0F5FA', color: '#1F4E79', label: 'New' },
@@ -328,11 +328,9 @@ export default function ResumeLeadsTab({ currentUser }) {
                           {lead.phone && <a href={`tel:${lead.phone}`} style={S.phoneLink}>📞 {lead.phone}</a>}
                           {lead.email && <a href={`mailto:${lead.email}`} style={S.emailLink}>✉️ {lead.email}</a>}
                           {(() => {
-                            const url = (lead.craigslistUrl || lead.url || lead.link || '').trim();
-                            const hasValidUrl = url &&
-                              url.includes('craigslist.org') &&
-                              (url.includes('/res/') || url.includes('/view/d/')) &&
-                              !url.includes('/search/');
+                            const rawUrl = (lead.craigslistUrl || lead.url || lead.link || '').trim();
+                            const url = cleanCraigslistUrl(rawUrl, lead.title);
+                            const hasValidUrl = url && url.includes('craigslist.org') && !url.includes('/search/');
                             return hasValidUrl ? (
                               <a
                                 href={url}

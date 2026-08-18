@@ -804,3 +804,25 @@ export const RESUME_SEARCH_KEYWORDS = [
   'freelance sales',
   '1099 sales',
 ];
+
+export function cleanCraigslistUrl(rawUrl, title = '') {
+  if (!rawUrl) return '';
+  let url = String(rawUrl).trim();
+
+  const viewMatch = url.match(/craigslist\.org\/(?:view\/d|res\/d)\/([^/]+)\/([^/?#]+)/i);
+  if (viewMatch) {
+    let slug = viewMatch[1];
+    const hashOrId = viewMatch[2].replace(/\.html$/i, '');
+
+    if (/^\d+:/.test(slug) || slug === 'posting' || !slug) {
+      slug = (title || '')
+        .toLowerCase()
+        .replace(/^(\d+,)+/, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'posting';
+    }
+    return `https://www.craigslist.org/view/d/${slug}/${hashOrId}`;
+  }
+
+  return url;
+}

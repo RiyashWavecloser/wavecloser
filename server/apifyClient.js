@@ -134,12 +134,25 @@ export async function fetchViaCLSAPI(citySlug, keywords, limit = 50) {
   const results = rawItems
     .filter(item => Array.isArray(item) && item.length >= 9)
     .map(item => {
-      const title       = String(item[8] || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').trim();
-      const pathSlug    = Array.isArray(item[7]) ? item[7][1] : String(item[7] || '');
+      const rawTitle    = String(item[8] || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').trim();
+      const title       = rawTitle.replace(/^(\d+,)+/, '').trim();
       const postingHash = Array.isArray(item[6]) ? item[6][1] : String(item[6] || item[0] || '');
 
-      // Real Craigslist post URL format: https://www.craigslist.org/view/d/{pathSlug}/{postingHash}
-      const link = pathSlug && postingHash
+      let pathSlug = '';
+      if (Array.isArray(item[7])) {
+        pathSlug = item[7].find(x => typeof x === 'string' && !/^\d+:/.test(x)) || '';
+      } else if (typeof item[7] === 'string' && !/^\d+:/.test(item[7])) {
+        pathSlug = item[7];
+      }
+
+      if (!pathSlug) {
+        pathSlug = (title || 'posting')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '') || 'posting';
+      }
+
+      const link = postingHash
         ? `https://www.craigslist.org/view/d/${pathSlug}/${postingHash}`
         : `https://${citySlug}.craigslist.org/search/res`;
 
