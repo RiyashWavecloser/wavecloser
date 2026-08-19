@@ -11,6 +11,7 @@
  * All leads are globally deduplicated on the server — agents only ever see fresh candidates.
  */
 
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { fetchMyResumeLeads, updateResumeLeadAPI, agentSelfSearchAndClaim } from '../lib/dataLayer.js';
 import { cleanCraigslistUrl } from '../data/constants.js';
 
