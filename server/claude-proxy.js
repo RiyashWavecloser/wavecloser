@@ -102,6 +102,7 @@ import {
   RESUME_SEARCH_KEYWORDS_LIST,
   isDemoLead,
   normalizeResumeURL,
+  normalizeForDedup,
 } from './constants.js';
 
 dotenv.config();
@@ -1812,7 +1813,7 @@ app.get('/api/resume-leads/pool-status', requireAuth, async (req, res) => {
     }
 
     const freshTestCount = testResults.filter(r =>
-      !dedupeSet.has(normalizeResumeURL(r.link)) && !isDemoLead(r)
+      !dedupeSet.has(normalizeForDedup(r.link)) && !isDemoLead(r)
     ).length;
 
     res.json({
@@ -1932,7 +1933,7 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
 
     // Step 3 — Filter out already-assigned resumes and demo leads
     const freshResumes = allResults.filter(r => {
-      const url = normalizeResumeURL(r.link || '');
+      const url = normalizeForDedup(r.link || '');
       return url && !globalDedupeSet.has(url) && !isDemoLead(r);
     });
 
@@ -1988,7 +1989,7 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
 
       for (const resume of batch) {
         const rawUrl = (resume.link || resume.craigslistUrl || resume.url || '').trim();
-        const urlForDedup = normalizeResumeURL(rawUrl);
+        const urlForDedup = normalizeForDedup(rawUrl);
         if (isDemoLead(resume)) {
           console.warn(`[BulkAssign] BLOCKED demo lead at save time: ${rawUrl}`);
           continue;
@@ -2093,7 +2094,7 @@ app.post('/api/resume-leads/agent-self-search', requireResumeAccess, async (req,
     // 2 — Filter already-assigned resumes and demo leads
     let globalDedupeSet = await getGlobalResumeDeduplicationSet();
     let freshResumes = allResults.filter(r => {
-      const url = normalizeResumeURL(r.link || '');
+      const url = normalizeForDedup(r.link || '');
       return url && !globalDedupeSet.has(url) && !isDemoLead(r);
     }).slice(0, fetchLimit);
 
@@ -2106,7 +2107,7 @@ app.post('/api/resume-leads/agent-self-search', requireResumeAccess, async (req,
         await cleanOldDedupEntries(3);
         globalDedupeSet = await getGlobalResumeDeduplicationSet();
         freshResumes = allResults.filter(r => {
-          const url = normalizeResumeURL(r.link || '');
+          const url = normalizeForDedup(r.link || '');
           return url && !globalDedupeSet.has(url) && !isDemoLead(r);
         }).slice(0, fetchLimit);
       } catch (e) {
@@ -2133,7 +2134,7 @@ app.post('/api/resume-leads/agent-self-search', requireResumeAccess, async (req,
     const savedLeads = [];
     for (const resume of freshResumes) {
       const rawUrl      = (resume.link || resume.craigslistUrl || resume.url || '').trim();
-      const urlForDedup = normalizeResumeURL(rawUrl);
+      const urlForDedup = normalizeForDedup(rawUrl);
 
       if (isDemoLead(resume)) {
         console.warn(`[AgentSelfSearch] BLOCKED demo lead at save time: ${rawUrl}`);

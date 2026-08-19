@@ -14,7 +14,7 @@
 import Airtable from 'airtable';
 import dotenv from 'dotenv';
 import { sendEmail, buildRecruiterLeadEmail } from './emailService.js';
-import { RECRUITING_AGENTS, AGENTS, normalizeResumeURL, isDemoLead } from './constants.js';
+import { RECRUITING_AGENTS, AGENTS, normalizeResumeURL, normalizeForDedup, isDemoLead } from './constants.js';
 dotenv.config();
 
 const API_KEY = process.env.AIRTABLE_API_KEY;
@@ -1445,7 +1445,7 @@ export async function getGlobalResumeDeduplicationSet(daysToKeep = 1) {
 
     const set = new Set();
     records.forEach(r => {
-      const url = normalizeResumeURL(r.get('CraigslistURL'));
+      const url = normalizeForDedup(r.get('CraigslistURL'));
       if (url) set.add(url);
     });
 
@@ -1460,7 +1460,7 @@ export async function getGlobalResumeDeduplicationSet(daysToKeep = 1) {
       );
       const set = new Set();
       records.forEach(r => {
-        const url = normalizeResumeURL(r.get('CraigslistURL'));
+        const url = normalizeForDedup(r.get('CraigslistURL'));
         if (url) set.add(url);
       });
       return set;
@@ -2099,7 +2099,7 @@ export async function bulkAssignResumeLeads(resumes, agentName, market) {
 
   for (const resume of resumes) {
     const rawUrl = (resume.link || resume.craigslistUrl || resume.url || '').trim();
-    const urlForDedup = normalizeResumeURL(rawUrl);
+    const urlForDedup = normalizeForDedup(rawUrl);
     if (!urlForDedup || globalDedupeSet.has(urlForDedup) || isDemoLead(resume)) {
       skipped++;
       continue;

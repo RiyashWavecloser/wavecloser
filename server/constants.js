@@ -695,13 +695,25 @@ export const DEMO_PHRASES = [
   'lorem ipsum',
 ];
 
+/**
+ * normalizeResumeURL — strips trailing slash, query params, and fragment.
+ * IMPORTANT: does NOT lowercase — Craigslist postingHash is case-sensitive.
+ * e.g. "a4HRs84R6cXEecD42jNemB" ≠ "a4hrs84r6cxeecd42jnemb" (404 if lowercased)
+ */
 export function normalizeResumeURL(url) {
   return (url || '')
     .trim()
-    .toLowerCase()
     .replace(/\/$/, '')
     .replace(/\?.*$/, '')
     .replace(/#.*$/, '');
+}
+
+/**
+ * normalizeForDedup — lowercase-normalised form ONLY for Set membership checks.
+ * Never save this to Airtable — use normalizeResumeURL for the real URL.
+ */
+export function normalizeForDedup(url) {
+  return normalizeResumeURL(url).toLowerCase();
 }
 
 export function cleanCraigslistUrl(rawUrl, title = '') {
