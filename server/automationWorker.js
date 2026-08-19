@@ -67,6 +67,7 @@ import {
   ALL_USA_BUSINESS_MARKETS,
   HIGH_VOLUME_CITIES,
   normalizeResumeURL,
+  normalizeForDedup,
   isDemoLead,
 } from './constants.js';
 import { generateLeads } from './leadWorker.js';
@@ -862,13 +863,13 @@ export async function distributeResumeLeads() {
               continue;
             }
 
-            // Skip if already in dedup registry
-            if (globalDedupeSet.has(url)) continue;
+            // Skip if already in dedup registry (use lowercase key for Set lookup)
+            if (globalDedupeSet.has(normalizeForDedup(url))) continue;
 
             // Skip if already seen in this run
-            if (seenUrls.has(url)) continue;
+            if (seenUrls.has(normalizeForDedup(url))) continue;
 
-            seenUrls.add(url);
+            seenUrls.add(normalizeForDedup(url));
             allFreshResumes.push({ ...r, link: url, market: city.label });
             addedCount++;
           }
@@ -967,7 +968,7 @@ export async function distributeResumeLeads() {
         title:         resume.title,
         description:   resume.description,
         phone:         resume.phone || '',
-        craigslistUrl: url,
+        craigslistUrl: url,  // case-preserved URL saved to Airtable
         market:        resume.market,
         assignedTo:    agent.name,
         assignedDate:  today,
@@ -976,7 +977,7 @@ export async function distributeResumeLeads() {
       });
 
       await registerResumeAsAssigned(url, agent.name, today);
-      globalDedupeSet.add(url);
+      globalDedupeSet.add(normalizeForDedup(url));
     }
 
     // Only AFTER successful save — create notification
