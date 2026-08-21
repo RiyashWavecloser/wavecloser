@@ -1806,6 +1806,9 @@ export async function getResumeLeadsByAgent(agentName, date) {
     }
 
     const uniqueTerms = [...new Set(terms.filter(Boolean))];
+
+    console.log(`[airtable] getResumeLeadsByAgent — querying for: ${JSON.stringify(uniqueTerms)}, date: ${date || 'all'}`);
+
     const orConditions = uniqueTerms.map(t =>
       `LOWER({AssignedTo}) = "${t.toLowerCase()}"`
     );
@@ -1827,6 +1830,22 @@ export async function getResumeLeadsByAgent(agentName, date) {
         })
         .all()
     );
+
+    console.log(`[airtable] getResumeLeadsByAgent — found ${records.length} leads for "${rawName}"`);
+
+    // Diagnostic: if 0 records, sample table to check what AssignedTo values exist
+    if (records.length === 0) {
+      try {
+        const sample = await retry(() =>
+          base()('ResumeLeads')
+            .select({ maxRecords: 5, fields: ['AssignedTo', 'AssignedDate', 'Title'] })
+            .all()
+        );
+        console.warn(`[airtable] 0 leads for "${rawName}" — sample AssignedTo values in table:`,
+          sample.map(r => `"${r.get('AssignedTo')}" (${r.get('AssignedDate')})` )
+        );
+      } catch (_) { /* non-critical */ }
+    }
 
     return records.map(r => ({
       id:            r.id, // ← AIRTABLE RECORD ID (rec...)

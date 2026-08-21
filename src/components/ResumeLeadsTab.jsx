@@ -46,6 +46,7 @@ export default function ResumeLeadsTab({ currentUser }) {
   const [saving, setSaving]               = useState({});
   const [callbackPickerLeadId, setCallbackPickerLeadId] = useState(null);
   const [callbackPickerValue, setCallbackPickerValue]   = useState('');
+  const [lastFetchTime, setLastFetchTime]               = useState(null);
   const prevCountRef                      = useRef(0);
   const pollRef                           = useRef(null);
 
@@ -74,6 +75,7 @@ export default function ResumeLeadsTab({ currentUser }) {
       showToast(`📋 ${fetched.length - prevCountRef.current} new resume leads assigned to you!`, 'success');
     }
     prevCountRef.current = fetched.length;
+    setLastFetchTime(new Date());
 
     setLeads(prev => {
       if (!silent || !prev.length) return fetched;
@@ -251,6 +253,20 @@ export default function ResumeLeadsTab({ currentUser }) {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Refresh row — last updated time + manual refresh button */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0 8px', marginTop: 2 }}>
+            <span style={{ fontSize: 11, color: '#888' }}>
+              {leads.length} leads assigned to you
+              {lastFetchTime && ` · Updated ${lastFetchTime.toLocaleTimeString()}`}
+            </span>
+            <button
+              onClick={() => load()}
+              style={{ fontSize: 11, color: '#3B82F6', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', borderRadius: 4 }}
+            >
+              ↻ Refresh
+            </button>
           </div>
 
           {/* Filter bar with status tabs and badges */}

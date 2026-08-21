@@ -61,6 +61,8 @@ export default function BulkAssignModal({ onClose }) {
   const [autoResult,       setAutoResult]       = useState(null);
   const [autoRunning,      setAutoRunning]       = useState(false);
 
+  const [dedupChecking, setDedupChecking] = useState(false);
+
   const showToast = (msg, type = 'info') => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 4000);
@@ -176,6 +178,38 @@ export default function BulkAssignModal({ onClose }) {
     setAutoRunning(false);
   };
 
+  // ─── Dedup Integrity Check ───────────────────────────────────────────────────
+  const handleDedupCheck = async () => {
+    setDedupChecking(true);
+    try {
+      const BASE = import.meta.env.VITE_API_URL || '';
+      const token = localStorage.getItem('wc_session_token') || '';
+      const resp = await fetch(`${BASE}/api/resume-leads/dedup-integrity-check`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        showToast(`Dedup check failed: ${data.error || resp.status}`, 'error');
+        return;
+      }
+      const samples = (data.duplicateSamples || []).slice(0, 3)
+        .map(d => `  • ${d.url}\n    Agents: ${d.agents.join(', ')}`)
+        .join('\n');
+      alert(
+        `🔍 Dedup Integrity Report\n\n` +
+        `Total leads in system: ${data.totalLeads}\n` +
+        `Dedup registry size:   ${data.dedupRegistrySize}\n` +
+        `Duplicate URLs found:  ${data.duplicateUrlCount}\n\n` +
+        `Status: ${data.status}` +
+        (samples ? `\n\nSample duplicates:\n${samples}` : '')
+      );
+    } catch (err) {
+      showToast(`Dedup check error: ${err.message}`, 'error');
+    } finally {
+      setDedupChecking(false);
+    }
+  };
+
   const toggleAgent = (name) => {
     setAutoAgentNames(prev =>
       prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]
@@ -198,7 +232,17 @@ export default function BulkAssignModal({ onClose }) {
             <div style={S.modalTitle}>🔍 Bulk Assign Resume Leads</div>
             <div style={S.modalSub}>Auto round-robin across multiple cities and agents</div>
           </div>
-          <button onClick={onClose} style={S.closeBtn}>✕</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={handleDedupCheck}
+              disabled={dedupChecking}
+              title="Check for duplicate leads assigned to multiple agents"
+              style={{ fontSize: 11, padding: '4px 10px', borderRadius: 6, border: '1px solid #D1D5DB', background: '#F9FAFB', color: '#374151', cursor: dedupChecking ? 'wait' : 'pointer' }}
+            >
+              {dedupChecking ? '...' : '🔍 Dedup Check'}
+            </button>
+            <button onClick={onClose} style={S.closeBtn}>✕</button>
+          </div>
         </div>
 
         {/* Mode toggle */}

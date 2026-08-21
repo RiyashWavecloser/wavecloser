@@ -1994,6 +1994,11 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
           console.warn(`[BulkAssign] BLOCKED demo lead at save time: ${rawUrl}`);
           continue;
         }
+        // Guard: skip if already registered in this run (cross-agent duplicate protection)
+        if (globalDedupeSet.has(urlForDedup)) {
+          console.warn(`[BulkAssign] Cross-agent duplicate blocked: ${rawUrl}`);
+          continue;
+        }
         await saveResumeLead({
           title:         resume.title,
           description:   resume.description,
@@ -2006,7 +2011,8 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
           status:        'New',
         });
         await registerResumeAsAssigned(rawUrl, agentName, today);
-        globalDedupeSet.add(urlForDedup);
+        globalDedupeSet.add(urlForDedup); // lock immediately — prevents next agent getting same URL
+        console.log(`[BulkAssign] ✓ Registered: ${rawUrl} → ${agentName}`);
       }
 
       summary.push({ agent: agentName, assigned: batch.length });
@@ -2247,6 +2253,59 @@ app.patch('/api/notifications/:id/read', requireAuth, async (req, res) => {
     res.json({ ok: true, demo: false });
   } catch (err) {
     console.error('[proxy] PATCH /api/notifications/:id/read:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/resume-leads/dedup-integrity-check ─────────────────────────────
+// Admin/PM only — scans ResumeLeads for URLs assigned to multiple agents.
+// Returns duplicate count, samples, and dedup registry size.
+
+app.get('/api/resume-leads/dedup-integrity-check', requireAuth, async (req, res) => {
+  if (!['admin', 'pm', 'project_manager'].includes(req.user?.role)) {
+    return res.status(403).json({ error: 'Admin or PM access required' });
+  }
+  if (!airtableReady()) return res.status(500).json({ error: 'Airtable not configured' });
+
+  try {
+    const Airtable = (await import('airtable')).default;
+    const airtableBase = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY })
+      .base(process.env.AIRTABLE_BASE_ID);
+
+    // 1 — Fetch all leads
+    const allLeads = await airtableBase('ResumeLeads')
+      .select({ fields: ['CraigslistURL', 'AssignedTo', 'AssignedDate'] })
+      .all();
+
+    // 2 — Find duplicate URLs (same URL assigned to multiple agents)
+    const urlMap = {};
+    allLeads.forEach(r => {
+      const rawUrl = r.get('CraigslistURL') || '';
+      const url    = normalizeForDedup(rawUrl);
+      const agent  = r.get('AssignedTo') || 'unknown';
+      if (!url) return;
+      if (!urlMap[url]) urlMap[url] = [];
+      urlMap[url].push(agent);
+    });
+
+    const duplicates = Object.entries(urlMap)
+      .filter(([, agents]) => agents.length > 1)
+      .map(([url, agents]) => ({ url, agents, count: agents.length }))
+      .sort((a, b) => b.count - a.count);
+
+    const dedupRegistrySize = (await getGlobalResumeDeduplicationSet()).size;
+
+    res.json({
+      totalLeads:        allLeads.length,
+      dedupRegistrySize,
+      duplicateUrlCount: duplicates.length,
+      duplicateSamples:  duplicates.slice(0, 10),
+      status: duplicates.length === 0
+        ? '✅ No duplicates found — dedup is working correctly'
+        : `⚠️ Found ${duplicates.length} URLs assigned to multiple agents`,
+    });
+  } catch (err) {
+    console.error('[dedup-integrity-check] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
