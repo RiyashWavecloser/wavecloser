@@ -1747,6 +1747,22 @@ export async function saveResumeLead(data) {
   }
 
   try {
+    // GUARANTEE ZERO DUPLICATES AT AIRTABLE WRITE TIME
+    const existingCheck = await retry(() =>
+      base()('ResumeLeads')
+        .select({
+          maxRecords: 1,
+          fields: ['CraigslistURL', 'AssignedTo'],
+          filterByFormula: `OR({CraigslistURL} = "${rawUrl}", LOWER({CraigslistURL}) = "${rawUrl.toLowerCase()}")`
+        })
+        .all()
+    );
+
+    if (existingCheck && existingCheck.length > 0) {
+      console.warn(`[saveResumeLead] ⚠ DUPLICATE BLOCKED: "${rawUrl}" already assigned to "${existingCheck[0].get('AssignedTo')}"`);
+      return null;
+    }
+
     const rec = await retry(() =>
       base()('ResumeLeads').create({
         Title:         data.title         || '',
@@ -1762,7 +1778,7 @@ export async function saveResumeLead(data) {
       })
     );
 
-    console.log(`[saveResumeLead] ✓ Saved valid lead: ${rawUrl}`);
+    console.log(`[saveResumeLead] ✓ Saved unique valid lead: ${rawUrl}`);
 
     return {
       id:            rec.id,
