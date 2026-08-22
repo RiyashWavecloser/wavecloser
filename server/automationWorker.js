@@ -740,8 +740,14 @@ if (!TEST_MODE) {
   setTimeout(async () => {
     console.log('[Worker] 🚀 Running startup lead distribution catch-up check...');
     try {
-      await distributeDailyLeads('morning');
-      await distributeResumeLeads();
+      // Prioritize recruiting/resume leads
+      await distributeResumeLeads().catch(e => console.error('[Worker] Startup resume distribution error:', e.message));
+
+      if (process.env.PAUSE_SALES_LEAD_DISTRIBUTION !== 'true') {
+        await distributeDailyLeads('morning').catch(e => console.error('[Worker] Startup sales distribution error:', e.message));
+      } else {
+        console.log('[Worker] ⏸ Startup sales lead distribution skipped (paused)');
+      }
       console.log('[Worker] ✓ Startup distribution catch-up complete.');
     } catch (err) {
       console.error('[Worker] Startup distribution catch-up error:', err.message);
@@ -756,19 +762,34 @@ if (!TEST_MODE) {
 // ─── Resume Lead Distribution ─────────────────────────────────────────────────
 
 function getKeywordsForToday() {
-  const allKeywords = RESUME_SEARCH_KEYWORDS;
-  const batchSize   = 15;
+  // Always include top core keywords that return maximum real candidates on Craigslist
+  const primaryKeywords = [
+    'sales',
+    'sales representative',
+    'customer representative',
+    'marketing',
+    'business development',
+    'cold calling',
+    'appointment setter',
+    'inside sales',
+    'telemarketing',
+    'account executive',
+  ];
+
+  const allKeywords = RESUME_SEARCH_KEYWORDS.filter(k => !primaryKeywords.includes(k.toLowerCase()));
+  const batchSize   = 10;
   const dayOfYear   = Math.floor(
     (new Date() - new Date(new Date().getFullYear(), 0, 0)) / 86400000
   );
   const startIndex = (dayOfYear * batchSize) % allKeywords.length;
-  const batch      = [];
+  const rotatingBatch = [];
 
   for (let i = 0; i < batchSize; i++) {
-    batch.push(allKeywords[(startIndex + i) % allKeywords.length]);
+    rotatingBatch.push(allKeywords[(startIndex + i) % allKeywords.length]);
   }
 
-  console.log(`[Worker] Today's keywords: ${batch.join(', ')}`);
+  const batch = [...primaryKeywords, ...rotatingBatch];
+  console.log(`[Worker] Today's ${batch.length} keywords: ${batch.join(', ')}`);
   return batch;
 }
 
