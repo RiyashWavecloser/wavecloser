@@ -1748,12 +1748,13 @@ export async function saveResumeLead(data) {
 
   try {
     // GUARANTEE ZERO DUPLICATES AT AIRTABLE WRITE TIME
+    const safeUrl = rawUrl.replace(/"/g, '\\"');
     const existingCheck = await retry(() =>
       base()('ResumeLeads')
         .select({
           maxRecords: 1,
           fields: ['CraigslistURL', 'AssignedTo'],
-          filterByFormula: `OR({CraigslistURL} = "${rawUrl}", LOWER({CraigslistURL}) = "${rawUrl.toLowerCase()}")`
+          filterByFormula: `OR({CraigslistURL} = "${safeUrl}", LOWER({CraigslistURL}) = "${safeUrl.toLowerCase()}")`
         })
         .all()
     );
