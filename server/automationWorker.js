@@ -925,12 +925,12 @@ export async function distributeResumeLeads() {
 
   console.log(`[Worker] Total fresh real leads available: ${allFreshResumes.length}`);
 
-  // If pool returned 0 fresh leads due to dedup lock, execute emergency dedup cleanup (1 day) and retry once
-  if (allFreshResumes.length === 0 && globalDedupeSet.size > 0) {
-    console.warn(`[Worker] 0 fresh leads found with ${globalDedupeSet.size} locked URLs — running emergency dedup cleanup (keeping 1 day)...`);
+  // If pool returned low fresh leads due to dedup lock, execute emergency dedup cleanup (1 day) and retry once
+  if (allFreshResumes.length < needed && globalDedupeSet.size > 0) {
+    console.warn(`[Worker] Pool low (${allFreshResumes.length}/${needed} needed) with ${globalDedupeSet.size} locked URLs — running emergency dedup refresh (keeping 1 day)...`);
     try {
       const cleaned = await cleanOldDedupEntries(1);
-      console.log(`[Worker] Emergency dedup cleanup removed ${cleaned} entries`);
+      console.log(`[Worker] Emergency dedup refresh removed ${cleaned} entries`);
       globalDedupeSet = await getGlobalResumeDeduplicationSet();
       await performSearchPass();
       console.log(`[Worker] Retry pass total fresh real leads available: ${allFreshResumes.length}`);

@@ -1436,15 +1436,8 @@ app.get('/api/resume-leads/stats', requireResumeAdmin, async (req, res) => {
  */
 app.post('/api/resume-leads/distribute-now', requireAuth, async (req, res) => {
   // Only admin/pm/recruiter can trigger this
-  if (!['admin', 'pm', 'recruiter', 'sponsor'].includes(req.user.role)) {
+  if (!['admin', 'pm', 'recruiter', 'sponsor', 'project_manager'].includes(req.user.role)) {
     return res.status(403).json({ error: 'Not authorized' });
-  }
-
-  if (!process.env.APIFY_API_KEY) {
-    return res.status(400).json({
-      error: 'APIFY_API_KEY not configured in Railway environment variables. Add it first.',
-      success: false,
-    });
   }
 
   try {
@@ -1974,14 +1967,14 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
       agentIndex = (agentIndex + 1) % targetAgents.length;
 
       // Stop if all selected agents have reached their countPerAgent limit
-      const allFull = agentNames.every(name => buckets[name].length >= countPerAgent);
+      const allFull = targetAgents.every(name => buckets[name] && buckets[name].length >= countPerAgent);
       if (allFull) break;
     }
 
     // Now save each agent's bucket to Airtable
     let summary = [];
-    for (const agentName of agentNames) {
-      const batch = buckets[agentName];
+    for (const agentName of targetAgents) {
+      const batch = buckets[agentName] || [];
       if (batch.length === 0) {
         summary.push({ agent: agentName, assigned: 0, note: 'Pool exhausted' });
         continue;
@@ -2005,7 +1998,7 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
           phone:         resume.phone || '',
           email:         resume.email || '',
           craigslistUrl: rawUrl, // Preserve exact case-sensitive URL
-          market:        city,
+          market:        resume.market || city,
           assignedTo:    agentName,
           assignedDate:  today,
           status:        'New',
@@ -2030,13 +2023,13 @@ app.post('/api/resume-leads/bulk-assign', requireResumeAdmin, async (req, res) =
 
       await appendLog({
         task:   'Bulk resume leads assigned',
-        target: `${agentName} → ${batch.length} resumes from ${city}`,
+        target: `${agentName} → ${batch.length} resumes from ${citiesInput.join(', ')}`,
         status: 'ok',
       });
     }
 
     const totalAssigned = summary.reduce((s, r) => s + r.assigned, 0);
-    console.log(`[BulkAssign] Complete — ${totalAssigned} resumes assigned across ${agentNames.length} agents (Round-Robin)`);
+    console.log(`[BulkAssign] Complete — ${totalAssigned} resumes assigned across ${targetAgents.length} agents (Round-Robin)`);
 
     // Per-city breakdown for the result display
     const perCityResult = Object.entries(perCityFreshBreakdown).map(([city, fresh]) => ({
