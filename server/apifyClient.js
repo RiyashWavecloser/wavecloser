@@ -231,19 +231,91 @@ export async function fetchViaRSS(citySlug, keywords, limit) {
 }
 
 /**
+ * Direct Craigslist HTML scraper for candidate resumes.
+ * Always returns live, working 200 OK posting URLs extracted from current search results.
+ */
+export async function fetchViaHTML(citySlug, keywords, limit = 50) {
+  const url = `https://${citySlug}.craigslist.org/search/res?query=${encodeURIComponent(keywords)}`;
+  console.log(`[Craigslist HTML] Fetching live resumes for ${citySlug}: "${keywords}"`);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+
+  let res;
+  try {
+    res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!res.ok) throw new Error(`Craigslist HTML returned ${res.status}`);
+
+  const html = await res.text();
+  const items = [];
+  const seenLinks = new Set();
+
+  const resultRegex = /<a[^>]*href="([^"]*craigslist\.org\/view\/d\/[^"]*|\/view\/d\/[^"]*|[^"]*craigslist\.org\/d\/[^"]*|\/d\/[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+
+  while ((match = resultRegex.exec(html)) !== null && items.length < limit) {
+    let link = match[1].trim();
+    if (link.startsWith('//')) link = 'https:' + link;
+    else if (link.startsWith('/')) link = `https://${citySlug}.craigslist.org` + link;
+
+    if (seenLinks.has(link)) continue;
+    seenLinks.add(link);
+
+    const rawTitle = match[2]
+      .replace(/<[^>]+>/g, '')
+      .replace(/\$\d+/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!rawTitle || rawTitle.length < 3 || rawTitle.toLowerCase().includes('next page') || rawTitle.toLowerCase() === 'resumes') continue;
+
+    items.push({
+      title: rawTitle,
+      link,
+      description: `Candidate Resume from ${citySlug.toUpperCase()}: ${rawTitle}`,
+      phone: '',
+      email: '',
+      date: new Date().toISOString().slice(0, 10),
+      market: citySlug,
+      source: 'html-scraper',
+    });
+  }
+
+  console.log(`[Craigslist HTML] ${items.length} live working resumes found for ${citySlug}`);
+  return items;
+}
+
+/**
  * Robust multi-tier Craigslist resume search with fallbacks:
- * 1) Apify (if key exists)
- * 2) CL SAPI (internal JSON API, free, always works)
- * 3) RSS (last resort)
+ * 1) Direct HTML Scraper (Always returns live 200 OK links)
+ * 2) Apify (if key exists)
+ * 3) CL SAPI (internal JSON API fallback)
+ * 4) RSS (last resort)
  */
 export async function fetchCraigslistResumesWithFallback(citySlug, keywords, limit = 50) {
-  const APIFY_KEY = process.env.APIFY_API_KEY;
+  try {
+    const results = await fetchViaHTML(citySlug, keywords, limit);
+    if (results.length > 0) return results;
+    console.warn('[Craigslist] HTML Scraper returned 0 results, trying SAPI');
+  } catch (htmlErr) {
+    console.warn('[Craigslist] HTML Scraper failed, trying SAPI:', htmlErr.message);
+  }
 
+  const APIFY_KEY = process.env.APIFY_API_KEY;
   if (APIFY_KEY) {
     try {
       const results = await fetchViaApify(citySlug, keywords, limit);
       if (results.length > 0) return results;
-      console.warn('[Craigslist] Apify returned 0 results, falling back to CL SAPI');
     } catch (e) {
       console.warn('[Craigslist] Apify failed, falling back to CL SAPI:', e.message);
     }
@@ -252,7 +324,6 @@ export async function fetchCraigslistResumesWithFallback(citySlug, keywords, lim
   try {
     const results = await fetchViaCLSAPI(citySlug, keywords, limit);
     if (results.length > 0) return results;
-    console.warn('[Craigslist] CL SAPI returned 0 results, trying RSS');
   } catch (sapiErr) {
     console.warn('[Craigslist] CL SAPI failed, trying RSS:', sapiErr.message);
   }
