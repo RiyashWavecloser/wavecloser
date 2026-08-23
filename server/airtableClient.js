@@ -1438,7 +1438,7 @@ export async function getGlobalResumeDeduplicationSet(daysToKeep = 1) {
       base()('ResumeDeduplicationRegistry')
         .select({
           fields: ['CraigslistURL', 'FirstSeenAt'],
-          filterByFormula: `OR(IS_AFTER({FirstSeenAt}, "${cutoff.toISOString()}"), {FirstSeenAt} = "")`
+          filterByFormula: `IS_AFTER({FirstSeenAt}, "${cutoff.toISOString()}")`
         })
         .all()
     );

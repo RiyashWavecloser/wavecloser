@@ -564,39 +564,38 @@ export async function distributeDailyLeads(session = 'morning') {
 }
 
 if (!TEST_MODE) {
-  const SALES_LEADS_PAUSED = process.env.PAUSE_SALES_LEAD_DISTRIBUTION === 'true';
+  // Sales lead auto-distribution is OFF by default (user requirement: ONLY RESUME LEADS auto-assigned)
+  const SALES_LEADS_PAUSED = process.env.PAUSE_SALES_LEAD_DISTRIBUTION !== 'false';
   if (SALES_LEADS_PAUSED) {
-    console.log('[Worker] ⏸ Sales lead auto-distribution is PAUSED (PAUSE_SALES_LEAD_DISTRIBUTION=true)');
-    console.log('[Worker] Recruiting lead distribution is still running normally');
+    console.log('[Worker] ⏸ Sales lead auto-distribution is OFF by default (PAUSE_SALES_LEAD_DISTRIBUTION!=false)');
+    console.log('[Worker] ✓ Recruiting / Resume lead distribution is ACTIVE and prioritized');
   }
 
-  // Morning distribution — 8:00 AM EST (= 1:00 PM UTC)
+  // Morning distribution (Sales leads) — only if explicitly enabled
   const morningCron = process.env.MORNING_DISTRIBUTION_TIME || '0 13 * * *';
   cron.schedule(morningCron, async () => {
-    if (process.env.PAUSE_SALES_LEAD_DISTRIBUTION === 'true') {
-      console.log('[Worker] ⏸ Morning sales lead distribution skipped — paused by admin');
+    if (SALES_LEADS_PAUSED) {
+      console.log('[Worker] ⏸ Morning sales lead distribution skipped — sales auto-assign is OFF');
       return;
     }
-    console.log('[Worker] ⏰ Morning lead distribution...');
+    console.log('[Worker] ⏰ Morning sales lead distribution...');
     await distributeDailyLeads('morning').catch(err => {
       console.error('[Worker] Morning distribution error:', err.message);
     });
   });
-  console.log(`[worker] ✓ Morning lead distribution cron scheduled: ${morningCron}`);
 
-  // Midday top-up — 12:00 PM EST (= 5:00 PM UTC)
+  // Midday top-up (Sales leads) — only if explicitly enabled
   const middayCron = process.env.MIDDAY_DISTRIBUTION_TIME || '0 17 * * *';
   cron.schedule(middayCron, async () => {
-    if (process.env.PAUSE_SALES_LEAD_DISTRIBUTION === 'true') {
-      console.log('[Worker] ⏸ Midday sales lead distribution skipped — paused by admin');
+    if (SALES_LEADS_PAUSED) {
+      console.log('[Worker] ⏸ Midday sales lead distribution skipped — sales auto-assign is OFF');
       return;
     }
-    console.log('[Worker] ⏰ Midday lead top-up...');
+    console.log('[Worker] ⏰ Midday sales lead top-up...');
     await distributeDailyLeads('midday').catch(err => {
       console.error('[Worker] Midday distribution error:', err.message);
     });
   });
-  console.log(`[worker] ✓ Midday lead distribution cron scheduled: ${middayCron}`);
 
   // Onboarding Weekly Report — Monday 7am
   cron.schedule('0 7 * * 1', async () => {
@@ -607,6 +606,7 @@ if (!TEST_MODE) {
 
   // Weekly Batch Lead Generation — Monday 8am
   cron.schedule('0 8 * * 1', async () => {
+    if (SALES_LEADS_PAUSED) return;
     console.log('[worker] ⏰ Cron: Monday 8:00 AM weekly lead generation & assignment');
     try {
       const targetMarkets = (process.env.LEAD_GENERATION_MARKETS || 'Miami FL,Houston TX,Atlanta GA,Chicago IL,Dallas TX')
@@ -628,15 +628,11 @@ if (!TEST_MODE) {
           }
         }
         
-        // Fetch fresh unassigned leads from Airtable to get their Airtable record IDs (_airtableId)
         generatedPool = await getUnassignedLeads(NUM_AGENTS * WEEKLY_LEADS_PER_AGENT);
       } else {
-        console.log('[worker] Airtable not configured — skipping weekly lead assignment');
         generatedPool = [];
       }
 
-
-      // Get all agents dynamically and sort by priority (Resellers first, then Reps, then Cold Callers)
       let activeAgents = [];
       if (airtableReady()) {
         activeAgents = await listAgents().catch(() => []);
@@ -658,9 +654,6 @@ if (!TEST_MODE) {
         return pA - pB;
       });
 
-      console.log(`[worker] Total unassigned leads available: ${generatedPool.length}. Assigning to agents in priority order...`);
-      
-      // Assign WEEKLY_LEADS_PER_AGENT leads to each agent
       for (let i = 0; i < activeAgents.length; i++) {
         const agent = activeAgents[i];
         const agentLeads = generatedPool.slice(i * WEEKLY_LEADS_PER_AGENT, (i + 1) * WEEKLY_LEADS_PER_AGENT);
@@ -679,7 +672,6 @@ if (!TEST_MODE) {
         status: 'sent'
       }).catch(() => {});
       
-      console.log('[worker] Weekly leads assignment complete.');
     } catch (err) {
       console.error('[worker] Weekly lead generation failed:', err.message);
     }
@@ -701,11 +693,21 @@ if (!TEST_MODE) {
   });
 
   // ─── Resume Distribution Crons ──────────────────────────────────────────────
+  // Primary 9:00 AM EST Weekdays Cron (14:00 UTC, Mon-Fri = '0 14 * * 1-5')
+  const weekday9AMCron = process.env.RESUME_DISTRIBUTION_CRON || '0 14 * * 1-5';
+  cron.schedule(weekday9AMCron, async () => {
+    console.log('[Worker] ⏰ 9:00 AM EST Weekday resume lead auto-distribution starting...');
+    await distributeResumeLeads().catch(err => {
+      console.error('[Worker] 9:00 AM EST resume distribution error:', err.message);
+    });
+  });
+
+  // Optional shift cron fallback (default 8 PM UTC)
   const resumeCron = process.env.PHILIPPINES_SHIFT_UTC || '0 20 * * *';
   cron.schedule(resumeCron, async () => {
     console.log('[Worker] ⏰ Shift start resume lead distribution starting...');
     await distributeResumeLeads().catch(err => {
-      console.error('[Worker] Resume distribution error:', err.message);
+      console.error('[Worker] Shift resume distribution error:', err.message);
     });
   });
 
@@ -717,23 +719,8 @@ if (!TEST_MODE) {
     });
   });
 
-  // Morning resume distribution — 8:00 AM EST (= 1:00 PM UTC)
-  cron.schedule(morningCron, async () => {
-    console.log('[Worker] ⏰ Morning resume lead distribution starting...');
-    await distributeResumeLeads().catch(err => {
-      console.error('[Worker] Morning resume distribution error:', err.message);
-    });
-  });
-
-  // Midday resume distribution — 12:00 PM EST (= 5:00 PM UTC)
-  cron.schedule(middayCron, async () => {
-    console.log('[Worker] ⏰ Midday resume lead distribution starting...');
-    await distributeResumeLeads().catch(err => {
-      console.error('[Worker] Midday resume distribution error:', err.message);
-    });
-  });
-
-  console.log(`[worker] ✓ Resume distribution crons scheduled (Morning, Midday, & Shift ${resumeCron})`);
+  console.log(`[worker] ✓ 9:00 AM EST Weekday Resume Lead auto-distribution scheduled (${weekday9AMCron})`);
+  console.log(`[worker]   Sales lead auto-distribution: OFF`);
   console.log(`[worker]   Cities: ${process.env.RESUME_SEARCH_CITIES || 'newyork,newjersey,miami,houston,dallas,chicago,atlanta'}`);
 
   // 🚀 Startup distribution catch-up: ensures leads are assigned immediately on server startup/deploy
