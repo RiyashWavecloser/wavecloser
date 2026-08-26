@@ -144,21 +144,35 @@ const app = express();
 // Enable trust proxy for correct IP detection behind Railway/Vercel
 app.set('trust proxy', 1);
 
+// ─── Robust CORS Middleware ───────────────────────────────────────────────────
+// Guarantees Access-Control-Allow-Origin & credentials for all Railway/Vercel origins and preflights
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
+
 const corsOptions = {
-  origin: (origin, cb) => {
-    // Non-browser requests (curl, server-to-server)
-    if (!origin) return cb(null, '*');
-    // Return exact origin string so Access-Control-Allow-Origin is set (required with credentials: true)
-    return cb(null, origin);
-  },
+  origin: true,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
   credentials: true,
   optionsSuccessStatus: 200,
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
 
 // ─── Serve compiled frontend (SPA) ──────────────────────────────────────────
 // In production Railway deploys: 'npm run build' builds dist/, then this server
