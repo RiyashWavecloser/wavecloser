@@ -41,11 +41,49 @@ function base() {
 }
 
 
+// ─── High-Performance In-Memory Response Cache (Zero-Memory-Leak LRU/TTL) ────
+const CACHE = new Map();
+const CACHE_MAX_SIZE = 500;
+
+function getFromCache(key) {
+  const item = CACHE.get(key);
+  if (!item) return null;
+  if (Date.now() > item.expiresAt) {
+    CACHE.delete(key);
+    return null;
+  }
+  return item.data;
+}
+
+function setToCache(key, data, ttlSeconds = 15) {
+  if (CACHE.size >= CACHE_MAX_SIZE) {
+    // Evict oldest 50 entries
+    const keys = Array.from(CACHE.keys()).slice(0, 50);
+    keys.forEach(k => CACHE.delete(k));
+  }
+  CACHE.set(key, {
+    data,
+    expiresAt: Date.now() + ttlSeconds * 1000,
+  });
+}
+
+export function invalidateCache(prefix = '') {
+  if (!prefix) {
+    CACHE.clear();
+    return;
+  }
+  for (const key of CACHE.keys()) {
+    if (key.startsWith(prefix) || key.includes(prefix)) {
+      CACHE.delete(key);
+    }
+  }
+}
+
 // ─── Retry with exponential backoff + jitter ─────────────────────────────────
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function retry(fn, attempts = 4) {
+async function retry(fn, attempts = 3) {
   let last;
   for (let i = 0; i < attempts; i++) {
     try { return await fn(); } catch (err) {
@@ -1809,6 +1847,12 @@ export async function saveResumeLead(data) {
  */
 export async function getResumeLeadsByAgent(agentName, date) {
   if (!isConfigured() || !agentName) return [];
+
+  // ─ Cache key: per-agent, per-date (30s TTL prevents OOM from 15s polling) ─
+  const cacheKey = `resume-leads:${agentName}:${date || 'all'}`;
+  const cached = getFromCache(cacheKey);
+  if (cached) return cached;
+
   try {
     const rawName = (agentName || '').trim();
     const cleanName = rawName.split('@')[0].replace(/[._-]/g, ' ').trim();
@@ -1824,8 +1868,6 @@ export async function getResumeLeadsByAgent(agentName, date) {
 
     const uniqueTerms = [...new Set(terms.filter(Boolean))];
 
-    console.log(`[airtable] getResumeLeadsByAgent — querying for: ${JSON.stringify(uniqueTerms)}, date: ${date || 'all'}`);
-
     const orConditions = uniqueTerms.map(t =>
       `LOWER({AssignedTo}) = "${t.toLowerCase()}"`
     );
@@ -1839,33 +1881,24 @@ export async function getResumeLeadsByAgent(agentName, date) {
       ? `AND(${assignedFormula}, DATETIME_FORMAT({AssignedDate}, 'YYYY-MM-DD') = "${date}")`
       : assignedFormula;
 
+    // CRITICAL: maxRecords + field projection to prevent OOM on large tables
     const records = await retry(() =>
       base()('ResumeLeads')
         .select({
           filterByFormula: formula,
           sort: [{ field: 'CreatedAt', direction: 'desc' }],
+          maxRecords: 300,
+          fields: ['Title', 'CraigslistURL', 'Market', 'AssignedTo', 'AssignedDate',
+                   'Status', 'Phone', 'Email', 'OutreachNotes', 'ContactedAt',
+                   'CallbackAt', 'CreatedAt', 'Description'],
         })
         .all()
     );
 
     console.log(`[airtable] getResumeLeadsByAgent — found ${records.length} leads for "${rawName}"`);
 
-    // Diagnostic: if 0 records, sample table to check what AssignedTo values exist
-    if (records.length === 0) {
-      try {
-        const sample = await retry(() =>
-          base()('ResumeLeads')
-            .select({ maxRecords: 5, fields: ['AssignedTo', 'AssignedDate', 'Title'] })
-            .all()
-        );
-        console.warn(`[airtable] 0 leads for "${rawName}" — sample AssignedTo values in table:`,
-          sample.map(r => `"${r.get('AssignedTo')}" (${r.get('AssignedDate')})` )
-        );
-      } catch (_) { /* non-critical */ }
-    }
-
-    return records.map(r => ({
-      id:            r.id, // ← AIRTABLE RECORD ID (rec...)
+    const result = records.map(r => ({
+      id:            r.id,
       title:         r.get('Title')         || '',
       description:   r.get('Description')   || '',
       phone:         r.get('Phone')         || '',
@@ -1880,6 +1913,10 @@ export async function getResumeLeadsByAgent(agentName, date) {
       callbackAt:    r.get('CallbackAt')    || '',
       createdAt:     r.get('CreatedAt')     || '',
     }));
+
+    // Cache for 30 seconds to absorb the 15s polling storm from all agents
+    setToCache(cacheKey, result, 30);
+    return result;
   } catch (err) {
     console.warn('[airtable] getResumeLeadsByAgent error:', err.message);
     return [];
@@ -2281,10 +2318,21 @@ function buildRecipientFormula(rawRecipient) {
  * Fetch notifications for a specific agent email or name.
  * Returns { notifications, unreadCount }.
  */
+// Track if Notifications table is unavailable to avoid repeated failed retries
+let notificationsTableAvailable = true;
+
 export async function fetchNotifications(recipientEmail) {
   if (!isConfigured()) return { notifications: [], unreadCount: 0 };
+  // If table previously returned 401/403, skip to avoid memory + log spam
+  if (!notificationsTableAvailable) return { notifications: [], unreadCount: 0 };
+
   const filterFormula = buildRecipientFormula(recipientEmail);
   if (!filterFormula) return { notifications: [], unreadCount: 0 };
+
+  // Cache per recipient for 30s to absorb 15s polling storm
+  const cacheKey = `notifications:${recipientEmail}`;
+  const cached = getFromCache(cacheKey);
+  if (cached) return cached;
 
   try {
     const records = await retry(() =>
@@ -2292,15 +2340,26 @@ export async function fetchNotifications(recipientEmail) {
         .select({
           filterByFormula: filterFormula,
           sort: [{ field: 'CreatedAt', direction: 'desc' }],
-          maxRecords: 50,
+          maxRecords: 20,
+          fields: ['RecipientEmail', 'Title', 'Message', 'Type', 'IsRead', 'CreatedAt'],
         })
         .all()
     );
     const notifications = records.map(recordToNotification);
     const unreadCount = notifications.filter(n => !n.isRead).length;
-    return { notifications, unreadCount };
+    const result = { notifications, unreadCount };
+    setToCache(cacheKey, result, 30);
+    return result;
   } catch (err) {
-    console.warn('[airtable] fetchNotifications error:', err.message);
+    // If unauthorized (403/401), permanently disable to prevent log spam & wasted retries
+    if (err?.statusCode === 403 || err?.statusCode === 401 ||
+        String(err.message).toLowerCase().includes('not authorized') ||
+        String(err.message).toLowerCase().includes('unauthorized')) {
+      notificationsTableAvailable = false;
+      console.warn('[airtable] fetchNotifications: Notifications table not accessible. Disabling polling. Check Airtable table permissions.');
+    } else {
+      console.warn('[airtable] fetchNotifications error:', err.message);
+    }
     return { notifications: [], unreadCount: 0 };
   }
 }
