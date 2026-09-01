@@ -71,7 +71,7 @@ import {
   isDemoLead,
 } from './constants.js';
 import { generateLeads } from './leadWorker.js';
-import { fetchViaApify, fetchCraigslistResumesWithFallback } from './apifyClient.js';
+import { fetchCraigslistResumesWithFallback, verifyApifyActor, blockedCitiesThisRun } from './apifyClient.js';
 
 
 dotenv.config();
@@ -813,6 +813,28 @@ async function createAgentNotification(agentEmail, agentName, leadCount, session
   }
 }
 
+/**
+ * Hard memory guard — abort remaining cities if heap grows dangerously large.
+ * Prevents the OOM crash by degrading gracefully instead of dying mid-run.
+ * Tune MEM_LIMIT_MB to match your Railway container (default: 1500 MB).
+ */
+const MEM_LIMIT_MB = parseInt(process.env.WORKER_MEM_LIMIT_MB) || 1500;
+function checkMemoryPressure() {
+  const usedMB = process.memoryUsage().heapUsed / 1024 / 1024;
+  if (usedMB > MEM_LIMIT_MB) {
+    console.error(
+      `[Worker] ⚠ Heap at ${usedMB.toFixed(0)} MB (limit ${MEM_LIMIT_MB} MB) — ` +
+      `aborting remaining cities to prevent OOM crash. ` +
+      `Set NODE_OPTIONS=--max-old-space-size=3072 in Railway env to raise the ceiling.`
+    );
+    return true;
+  }
+  return false;
+}
+
+/** Number of consecutive zero-result keywords before abandoning a city. */
+const ZERO_RESULT_BAILOUT = parseInt(process.env.ZERO_RESULT_BAILOUT) || 3;
+
 export async function distributeResumeLeads() {
   const today = new Date().toISOString().split('T')[0];
 
@@ -824,14 +846,17 @@ export async function distributeResumeLeads() {
     return;
   }
 
-  if (!process.env.APIFY_API_KEY) {
-    console.log('[Worker] APIFY_API_KEY not set — using Craigslist Search API (CL-SAPI) fallback');
-  }
+  // ── Fix 1: Verify Apify actor ONCE at startup ────────────────────────────────
+  // Avoids a wasted 404 round-trip on every keyword×city pair if actor is stale.
+  const apifyAvailable = await verifyApifyActor();
+  // Clear the per-run city circuit breaker for a fresh start
+  blockedCitiesThisRun.clear();
 
-  const needed     = agents.length * DAILY_RESUME_LEADS_PER_WCR;
-  const fetchTarget = needed * 10; // fetch 10x buffer to survive dedup filtering
+  const needed      = agents.length * DAILY_RESUME_LEADS_PER_WCR;
+  const fetchTarget = needed * 10; // fetch 10× buffer to survive dedup filtering
 
   console.log(`[Worker] Need ${needed} leads for ${agents.length} agents. Will fetch up to ${fetchTarget} raw results.`);
+  console.log(`[Worker] Apify available: ${apifyAvailable}`);
 
   // Load dedup registry
   let globalDedupeSet = await getGlobalResumeDeduplicationSet();
@@ -858,77 +883,136 @@ export async function distributeResumeLeads() {
   const todayCities = getCitiesForToday();
   console.log(`[Worker] Today's cities: ${todayCities.map(c => c.label).join(', ')}`);
 
-  let allFreshResumes = [];
+  // ── Fix 4: Round-robin agent bucket for immediate streaming write ────────────
+  // Buckets are capped at DAILY_RESUME_LEADS_PER_WCR per agent.
+  // We write to Airtable immediately as each lead is found — no outer accumulator.
+  const buckets = {};
+  agents.forEach(a => { buckets[a.name] = []; });
+  let agentIdx     = 0; // round-robin cursor
+  let totalStaged  = 0;
+
+  // seenUrls tracks within-run duplicates across city×keyword iterations
   const seenUrls = new Set();
 
-  // Loop cities AND keywords until we have enough
-  async function performSearchPass() {
-    outerLoop:
-    for (const city of todayCities) {
-      for (const keyword of todayKeywords) {
-        if (allFreshResumes.length >= fetchTarget) break outerLoop;
+  // ── Fix 2/3: City loop with zero-result bailout + circuit breaker ────────────
+  outerLoop:
+  for (const city of todayCities) {
+    // Fix 4: hard memory guard — stop if heap is dangerously high
+    if (checkMemoryPressure()) break;
 
-        try {
-          console.log(`[Worker] Fetching: "${keyword}" in ${city.label}...`);
-          const results = await fetchCraigslistResumesWithFallback(city.slug, keyword, 100);
+    let consecutiveEmpty = 0;
 
-          let addedCount = 0;
-          for (const r of results) {
-            const url = normalizeResumeURL(r.link);
+    for (const keyword of todayKeywords) {
+      if (totalStaged >= fetchTarget) break outerLoop;
 
-            // Skip if no valid URL
-            if (!url || !url.startsWith('https://') || !url.includes('craigslist.org')) continue;
+      try {
+        console.log(`[Worker] Fetching: "${keyword}" in ${city.label}...`);
 
-            // Skip if demo data
-            if (isDemoLead(r)) {
-              console.warn(`[Worker] Blocked demo lead: ${url}`);
-              continue;
-            }
+        // Fix 1 + Fix 2: pass apifyAvailable and circuit breaker set
+        const results = await fetchCraigslistResumesWithFallback(
+          city.slug, keyword, 100, apifyAvailable, blockedCitiesThisRun
+        );
 
-            // Skip if already in dedup registry (use lowercase key for Set lookup)
-            if (globalDedupeSet.has(normalizeForDedup(url))) continue;
-
-            // Skip if already seen in this run
-            if (seenUrls.has(normalizeForDedup(url))) continue;
-
-            seenUrls.add(normalizeForDedup(url));
-            allFreshResumes.push({ ...r, link: url, market: city.label });
-            addedCount++;
+        // ── Fix 3: zero-result city bail-out ──────────────────────────────────
+        if (results.length === 0) {
+          consecutiveEmpty++;
+          if (consecutiveEmpty >= ZERO_RESULT_BAILOUT) {
+            console.log(
+              `[Worker] ${city.label}: ${consecutiveEmpty} consecutive empty keywords — ` +
+              `skipping rest of city`
+            );
+            break; // break the keyword loop, continue to next city
           }
-
-          console.log(`[Worker] "${keyword}" in ${city.label}: ${results.length} raw → ${addedCount} fresh added (total: ${allFreshResumes.length})`);
-
-          // Delay between requests
-          await new Promise(r => setTimeout(r, 1000));
-
-        } catch (err) {
-          console.error(`[Worker] Failed "${keyword}" in ${city.label}:`, err.message);
+          continue;
         }
+        consecutiveEmpty = 0; // reset on any successful result
+
+        // ── Fix 4: process and write immediately, never accumulate ─────────────
+        let addedThisBatch = 0;
+        for (const r of results) {
+          const url = normalizeResumeURL(r.link);
+          if (!url || !url.startsWith('https://') || !url.includes('craigslist.org')) continue;
+          if (isDemoLead(r)) continue;
+          if (globalDedupeSet.has(normalizeForDedup(url))) continue;
+          if (seenUrls.has(normalizeForDedup(url))) continue;
+
+          // Find the next agent that still has room
+          let assigned = false;
+          for (let attempt = 0; attempt < agents.length; attempt++) {
+            const agent = agents[agentIdx % agents.length];
+            agentIdx++;
+            if (buckets[agent.name].length < DAILY_RESUME_LEADS_PER_WCR) {
+              // Mark dedup BEFORE the async write so parallel paths can't grab same URL
+              seenUrls.add(normalizeForDedup(url));
+              globalDedupeSet.add(normalizeForDedup(url));
+
+              // Write to Airtable immediately — no outer array growth
+              if (isDemoLead(r)) {
+                console.error(`[Worker] BLOCKED demo lead at save time: ${url}`);
+                break;
+              }
+              await saveResumeLead({
+                title:         r.title,
+                description:   r.description,
+                phone:         r.phone || '',
+                craigslistUrl: url,
+                market:        city.label,
+                assignedTo:    agent.name,
+                assignedDate:  today,
+                status:        'New',
+                source:        'worker',
+              });
+              await registerResumeAsAssigned(url, agent.name, today);
+
+              buckets[agent.name].push(url); // track count only, not full object
+              totalStaged++;
+              addedThisBatch++;
+              assigned = true;
+              break;
+            }
+          }
+          if (!assigned) break outerLoop; // all agents are full
+          if (totalStaged >= fetchTarget) break outerLoop;
+        }
+
+        console.log(
+          `[Worker] "${keyword}" in ${city.label}: ` +
+          `${results.length} raw → ${addedThisBatch} staged (total: ${totalStaged})`
+        );
+
+      } catch (err) {
+        console.error(`[Worker] Failed "${keyword}" in ${city.label}:`, err.message);
       }
+
+      // Delay between requests
+      await new Promise(r => setTimeout(r, 1000));
     }
   }
 
-  await performSearchPass();
+  console.log(`[Worker] Search pass complete. Total staged: ${totalStaged}`);
 
-  console.log(`[Worker] Total fresh real leads available: ${allFreshResumes.length}`);
-
-  // If pool returned low fresh leads due to dedup lock, execute emergency dedup cleanup (1 day) and retry once
-  if (allFreshResumes.length < needed && globalDedupeSet.size > 0) {
-    console.warn(`[Worker] Pool low (${allFreshResumes.length}/${needed} needed) with ${globalDedupeSet.size} locked URLs — running emergency dedup refresh (keeping 1 day)...`);
+  // If pool is low after first pass, run emergency dedup cleanup and retry
+  const allFull = agents.every(a => buckets[a.name].length >= DAILY_RESUME_LEADS_PER_WCR);
+  if (!allFull && totalStaged < needed && globalDedupeSet.size > 0) {
+    console.warn(
+      `[Worker] Pool low (${totalStaged}/${needed} needed) with ${globalDedupeSet.size} locked URLs — ` +
+      `running emergency dedup refresh (keeping 1 day)...`
+    );
     try {
       const cleaned = await cleanOldDedupEntries(1);
       console.log(`[Worker] Emergency dedup refresh removed ${cleaned} entries`);
       globalDedupeSet = await getGlobalResumeDeduplicationSet();
-      await performSearchPass();
-      console.log(`[Worker] Retry pass total fresh real leads available: ${allFreshResumes.length}`);
+      // NOTE: we do NOT recurse here to avoid unbounded memory growth.
+      // The next scheduled run will pick up the unlocked leads.
+      console.log('[Worker] Dedup refresh done. Remaining agents will get leads next run.');
     } catch (e) {
       console.error('[Worker] Emergency dedup cleanup error:', e.message);
     }
   }
 
   // Check if we have enough
-  if (allFreshResumes.length === 0) {
-    console.warn('[Worker] No candidate resumes available in this cycle. Skipping assignment.');
+  if (totalStaged === 0) {
+    console.warn('[Worker] No candidate resumes staged in this cycle. Skipping assignment.');
     await appendLog({
       task:   'Resume lead distribution skipped',
       target: 'No new unassigned candidate resumes returned from Craigslist search pass. Will retry next cycle.',
@@ -937,37 +1021,20 @@ export async function distributeResumeLeads() {
     return;
   }
 
-  if (allFreshResumes.length < needed) {
-    console.warn(`[Worker] LOW POOL — only ${allFreshResumes.length} leads for ${needed} needed`);
+  if (totalStaged < needed) {
+    console.warn(`[Worker] LOW POOL — only ${totalStaged} leads staged for ${needed} needed`);
     await appendLog({
       task:   'Resume distribution — low pool warning',
-      target: `Only ${allFreshResumes.length} fresh leads available. ${needed} needed for ${agents.length} agents. Distributing what we have.`,
+      target: `Only ${totalStaged} fresh leads staged. ${needed} needed for ${agents.length} agents. Distributing what we have.`,
       status: 'alert',
     });
-    // Continue with what we have — do NOT abort
   }
 
-  // ROUND-ROBIN distribution
-  const buckets = {};
-  agents.forEach(a => { buckets[a.name] = []; });
-
-  let pool = [...allFreshResumes];
-  let i    = 0;
-
-  while (pool.length > 0) {
-    const agent = agents[i % agents.length];
-    if (buckets[agent.name].length < DAILY_RESUME_LEADS_PER_WCR) {
-      buckets[agent.name].push(pool.shift());
-    }
-    i++;
-    if (agents.every(a => buckets[a.name].length >= DAILY_RESUME_LEADS_PER_WCR)) break;
-  }
-
-  // Save to Airtable + register in dedup
+  // Send notifications (leads already written to Airtable above)
   for (const agent of agents) {
-    const batch = buckets[agent.name];
+    const count = buckets[agent.name].length;
 
-    if (batch.length === 0) {
+    if (count === 0) {
       await appendLog({
         task:   'Resume distribution — agent skipped',
         target: `${agent.name} received 0 leads — pool exhausted before reaching this agent`,
@@ -977,54 +1044,20 @@ export async function distributeResumeLeads() {
       continue;
     }
 
-    for (const resume of batch) {
-      const url = normalizeResumeURL(resume.link);
-
-      // Final demo check before saving
-      if (isDemoLead(resume)) {
-        console.error(`[Worker] BLOCKED demo lead at save time: ${url}`);
-        continue;
-      }
-
-      await saveResumeLead({
-        title:         resume.title,
-        description:   resume.description,
-        phone:         resume.phone || '',
-        craigslistUrl: url,  // case-preserved URL saved to Airtable
-        market:        resume.market,
-        assignedTo:    agent.name,
-        assignedDate:  today,
-        status:        'New',
-        source:        'apify',
-      });
-
-      await registerResumeAsAssigned(url, agent.name, today);
-      globalDedupeSet.add(normalizeForDedup(url));
-    }
-
-    // Only AFTER successful save — create notification
-    if (batch.length > 0) {
-      await createAgentNotification(
-        agent.email,
-        agent.name,
-        batch.length,
-        'daily'
-      );
-    }
+    // Notification (leads already saved above during the search pass)
+    await createAgentNotification(agent.email, agent.name, count, 'daily');
 
     await appendLog({
       task:   'Real resume leads distributed',
-      target: `${agent.name} → ${batch.length} real leads assigned`,
+      target: `${agent.name} → ${count} real leads assigned`,
       status: 'ok',
     });
 
-    console.log(`[Worker] ✓ ${agent.name}: ${batch.length} real leads assigned`);
+    console.log(`[Worker] ✓ ${agent.name}: ${count} real leads assigned`);
   }
 
   console.log('[Worker] Distribution complete');
 }
-
-
 
 // ─── Test mode ────────────────────────────────────────────────────────────────
 
