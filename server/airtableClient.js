@@ -1817,7 +1817,18 @@ export async function saveResumeLead(data) {
       })
     );
 
-    console.log(`[saveResumeLead] ✓ Saved unique valid lead: ${rawUrl}`);
+    // CHECK 1 DIAGNOSTIC — confirm AssignedTo and Status are always populated
+    const savedAssignedTo = rec.get('AssignedTo') || '';
+    const savedStatus     = rec.get('Status')     || 'New';
+    console.log(`[SaveLead] ✓ Saved "${rec.get('Title') || rawUrl}" → AssignedTo="${savedAssignedTo}" Status="${savedStatus}"`);
+    if (!savedAssignedTo) {
+      console.warn('[SaveLead] ⚠ AssignedTo is BLANK — bug is upstream in the assignment call (assignedTo was not passed to saveResumeLead).');
+    }
+
+    // Invalidate this agent's cache so the next poll sees the new lead immediately
+    if (savedAssignedTo) {
+      invalidateCache(`resume-leads:${savedAssignedTo}`);
+    }
 
     return {
       id:            rec.id,
@@ -1827,9 +1838,9 @@ export async function saveResumeLead(data) {
       email:         rec.get('Email')         || '',
       craigslistUrl: rec.get('CraigslistURL') || '',
       market:        rec.get('Market')        || '',
-      assignedTo:    rec.get('AssignedTo')    || '',
+      assignedTo:    savedAssignedTo,
       assignedDate:  rec.get('AssignedDate')  || '',
-      status:        rec.get('Status')        || 'New',
+      status:        savedStatus,
       outreachNotes: '',
       contactedAt:   '',
       createdAt:     rec.get('CreatedAt')     || '',
@@ -1882,20 +1893,36 @@ export async function getResumeLeadsByAgent(agentName, date) {
       : assignedFormula;
 
     // CRITICAL: maxRecords + field projection to prevent OOM on large tables
+    // NOTE: Do NOT include fields that don't exist in Airtable (ContactedAt, CallbackAt are optional)
     const records = await retry(() =>
       base()('ResumeLeads')
         .select({
           filterByFormula: formula,
           sort: [{ field: 'CreatedAt', direction: 'desc' }],
           maxRecords: 300,
-          fields: ['Title', 'CraigslistURL', 'Market', 'AssignedTo', 'AssignedDate',
-                   'Status', 'Phone', 'Email', 'OutreachNotes', 'ContactedAt',
-                   'CallbackAt', 'CreatedAt', 'Description'],
         })
         .all()
     );
 
-    console.log(`[airtable] getResumeLeadsByAgent — found ${records.length} leads for "${rawName}"`);
+    // CHECK 2 DIAGNOSTIC — when 0 results, log a raw sample to compare stored vs searched names
+    console.log(`[AssignedLeads] Querying for agent: "${rawName}" (terms: ${uniqueTerms.join(', ')}) → found ${records.length} leads`);
+    if (records.length === 0) {
+      try {
+        const sample = await retry(() =>
+          base()('ResumeLeads')
+            .select({ maxRecords: 5, fields: ['AssignedTo', 'Status', 'Title'] })
+            .all()
+        );
+        console.warn('[AssignedLeads] Sample AssignedTo/Status values in table:',
+          sample.map(r => ({ assignedTo: r.get('AssignedTo'), status: r.get('Status'), title: r.get('Title') }))
+        );
+        if (sample.length === 0) {
+          console.warn('[AssignedLeads] ResumeLeads table appears to be EMPTY — no records at all.');
+        }
+      } catch (sampleErr) {
+        console.warn('[AssignedLeads] Could not fetch sample:', sampleErr.message);
+      }
+    }
 
     const result = records.map(r => ({
       id:            r.id,
@@ -2192,6 +2219,12 @@ export async function bulkAssignResumeLeads(resumes, agentName, market) {
     await registerResumeAsAssigned(rawUrl, agentName, today);
     globalDedupeSet.add(urlForDedup);
     assigned++;
+  }
+
+  // Invalidate cache so agent sees new leads on next poll without waiting 30s
+  if (assigned > 0) {
+    invalidateCache(`resume-leads:${agentName}`);
+    console.log(`[bulkAssignResumeLeads] Cache invalidated for "${agentName}" — ${assigned} leads now live`);
   }
 
   return { assigned, skipped };
