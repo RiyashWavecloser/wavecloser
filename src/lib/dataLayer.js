@@ -16,26 +16,42 @@
  */
 
 export function getBaseURL() {
+  // Read the Vite env variable
   const configured = import.meta.env.VITE_CLAUDE_PROXY_URL ||
                      import.meta.env.VITE_BACKEND_URL ||
                      import.meta.env.VITE_API_URL;
 
-  if (configured) {
-    return configured.replace('/api/claude', '').replace(/\/$/, '');
+  console.log('[dataLayer] Raw VITE_CLAUDE_PROXY_URL:', configured);
+
+  if (configured && configured !== '' && !configured.includes('localhost')) {
+    // Strip /api/claude suffix if present — we build paths ourselves
+    const base = configured
+      .replace('/api/claude', '')
+      .replace(/\/$/, '')
+      .trim();
+    console.log('[dataLayer] Using configured backend:', base);
+    return base;
   }
 
-  // Detect if we are in production (not localhost)
-  const isProduction = typeof window !== 'undefined' &&
-                       !window.location.hostname.includes('localhost') &&
-                       !window.location.hostname.includes('127.0.0.1');
+  // Check if we are running in production (Railway)
+  const hostname = typeof window !== 'undefined' ? window.location.hostname : '';
+  const isProduction = (
+    hostname.includes('railway.app') ||
+    hostname.includes('waveclosers') ||
+    (!hostname.includes('localhost') && !hostname.includes('127.0.0.1'))
+  );
 
   if (isProduction) {
-    console.warn(
-      '[dataLayer] VITE_CLAUDE_PROXY_URL not set in Railway frontend variables. Defaulting to Railway backend: https://waveclosers-backend-production.up.railway.app'
-    );
-    return 'https://waveclosers-backend-production.up.railway.app';
+    // HARDCODE the production backend URL as absolute last resort
+    // This only runs if VITE_CLAUDE_PROXY_URL is not set correctly
+    const fallback = 'https://waveclosers-backend-production.up.railway.app';
+    console.warn('[dataLayer] VITE_CLAUDE_PROXY_URL not set — using hardcoded fallback:', fallback);
+    console.warn('[dataLayer] FIX: Set VITE_CLAUDE_PROXY_URL in Railway frontend service variables and redeploy');
+    return fallback;
   }
 
+  // Local dev only
+  console.log('[dataLayer] Local dev — using localhost:3001');
   return 'http://localhost:3001';
 }
 
@@ -43,7 +59,7 @@ export const BASE = getBaseURL();
 export const API_BASE = BASE;
 const PROXY = BASE;
 
-// Log on startup so Railway/browser console logs show what URL is being used
+// Log on startup so Railway logs show what URL is being used
 console.log(`[dataLayer] Backend URL: ${BASE || 'NOT CONFIGURED — check VITE_CLAUDE_PROXY_URL'}`);
 
 export async function loginAPI(email, password) {
