@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { BASE } from '../lib/dataLayer.js';
 
 function checkStrength(pw) {
   if (!pw) return { score: 0, tier: 'weak', label: '', color: '#999' };
@@ -15,13 +16,6 @@ function checkStrength(pw) {
   if (score === 3) return { score: 3, tier: 'good',   label: 'Good',   color: '#5B8DEF' };
   return                  { score: 4, tier: 'strong', label: 'Strong', color: 'var(--color-green)' };
 }
-
-const BACKEND_BASE = (
-  import.meta.env.VITE_BACKEND_URL ||
-  import.meta.env.VITE_API_URL ||
-  (import.meta.env.VITE_CLAUDE_PROXY_URL ? import.meta.env.VITE_CLAUDE_PROXY_URL.replace('/api/claude', '') : '') ||
-  ''
-).replace(/\/$/, '');
 
 export default function ChangePassword({ onChanged, onLogout }) {
   const [currentPassword, setCurrentPassword] = useState('');
@@ -54,7 +48,7 @@ export default function ChangePassword({ onChanged, onLogout }) {
     try {
       const token = localStorage.getItem('wc_session_token');
 
-      const res = await fetch(`${BACKEND_BASE}/api/auth/change-password`, {
+      const res = await fetch(`${BASE}/api/auth/change-password`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',

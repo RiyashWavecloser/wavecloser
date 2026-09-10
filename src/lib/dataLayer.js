@@ -15,14 +15,69 @@
  *   checkServerHealth()         → { status, claude, airtable, email }
  */
 
-export const API_BASE = (
-  import.meta.env.VITE_BACKEND_URL ||
-  import.meta.env.VITE_API_URL ||
-  (import.meta.env.VITE_CLAUDE_PROXY_URL ? import.meta.env.VITE_CLAUDE_PROXY_URL.replace('/api/claude', '') : '') ||
-  ''
-).replace(/\/$/, '');
+export function getBaseURL() {
+  const configured = import.meta.env.VITE_CLAUDE_PROXY_URL ||
+                     import.meta.env.VITE_BACKEND_URL ||
+                     import.meta.env.VITE_API_URL;
 
-const PROXY = API_BASE;
+  if (configured) {
+    return configured.replace('/api/claude', '').replace(/\/$/, '');
+  }
+
+  // Detect if we are in production (not localhost)
+  const isProduction = typeof window !== 'undefined' &&
+                       !window.location.hostname.includes('localhost') &&
+                       !window.location.hostname.includes('127.0.0.1');
+
+  if (isProduction) {
+    console.warn(
+      '[dataLayer] VITE_CLAUDE_PROXY_URL not set in Railway frontend variables. Defaulting to Railway backend: https://waveclosers-backend-production.up.railway.app'
+    );
+    return 'https://waveclosers-backend-production.up.railway.app';
+  }
+
+  return 'http://localhost:3001';
+}
+
+export const BASE = getBaseURL();
+export const API_BASE = BASE;
+const PROXY = BASE;
+
+// Log on startup so Railway/browser console logs show what URL is being used
+console.log(`[dataLayer] Backend URL: ${BASE || 'NOT CONFIGURED — check VITE_CLAUDE_PROXY_URL'}`);
+
+export async function loginAPI(email, password) {
+  if (!BASE) {
+    return {
+      error: 'Backend URL not configured. Set VITE_CLAUDE_PROXY_URL in Railway frontend variables and redeploy.',
+    };
+  }
+
+  try {
+    const res = await fetch(`${BASE}/api/auth/login`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ email, password }),
+    });
+
+    if (!res.ok) {
+      let errMsg = 'Login failed';
+      try {
+        const data = await res.json();
+        errMsg = data.error || errMsg;
+      } catch {
+        const txt = await res.text();
+        errMsg = txt || errMsg;
+      }
+      return { error: errMsg };
+    }
+
+    return await res.json();
+  } catch (err) {
+    console.error('[loginAPI] fetch error:', err.message);
+    throw err;
+  }
+}
 
 
 let _token = localStorage.getItem('wc_session_token') || null;

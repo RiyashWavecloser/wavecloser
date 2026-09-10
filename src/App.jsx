@@ -18,7 +18,7 @@ const ChangePassword    = lazy(() => import('./modules/ChangePassword.jsx'));
 const AgentPortal       = lazy(() => import('./modules/AgentPortal.jsx'));
 const QualifierPortal   = lazy(() => import('./modules/QualifierPortal.jsx'));
 
-import { fetchUsersFromAPI, createUserAPI, updateUserAPI, deleteUserAPI, getSession, setSession, clearMustChangePassword, fetchQualifierQueueAPI, fetchLeadsFromAPI, loadLeadsFromStorage } from './lib/dataLayer.js';
+import { fetchUsersFromAPI, createUserAPI, updateUserAPI, deleteUserAPI, getSession, setSession, clearMustChangePassword, fetchQualifierQueueAPI, fetchLeadsFromAPI, loadLeadsFromStorage, BASE } from './lib/dataLayer.js';
 import { ROLE_USER_FILTER, canAccess, defaultView, ROLES, isAgentRole } from './data/roles.js';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
 const RecruiterPortal = lazy(() => import('./modules/RecruiterPortal.jsx'));
@@ -76,6 +76,27 @@ export default function App() {
 
   const [leadBadge, setLeadBadge] = useState(0);
   const [uncalledLeadsCount, setUncalledLeadsCount] = useState(0);
+
+  // Backend health check on initial mount
+  useEffect(() => {
+    async function checkBackend() {
+      if (!BASE) {
+        console.error('[App] No backend URL configured — VITE_CLAUDE_PROXY_URL is missing');
+        return;
+      }
+      try {
+        const res = await fetch(`${BASE}/health`);
+        const data = await res.json();
+        console.log('[App] Backend health:', data);
+        setBackendLive(true);
+      } catch (err) {
+        console.error('[App] Backend unreachable:', err.message);
+        console.error('[App] Backend URL being used:', BASE);
+        setBackendLive(false);
+      }
+    }
+    checkBackend();
+  }, []);
 
   // Poll Qualifier Queue to update Lead Generation Sidebar badge + uncalled leads count
   useEffect(() => {

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { loginAPI, BASE } from '../lib/dataLayer.js';
 
 function checkStrength(pw) {
   if (!pw) return { score: 0, tier: 'weak', label: '', color: '#999' };
@@ -15,13 +16,6 @@ function checkStrength(pw) {
   if (score === 3) return { score: 3, tier: 'good',   label: 'Good',   color: '#5B8DEF' };
   return                  { score: 4, tier: 'strong', label: 'Strong', color: '#10B981' };
 }
-
-const BACKEND_BASE = (
-  import.meta.env.VITE_BACKEND_URL ||
-  import.meta.env.VITE_API_URL ||
-  (import.meta.env.VITE_CLAUDE_PROXY_URL ? import.meta.env.VITE_CLAUDE_PROXY_URL.replace('/api/claude', '') : '') ||
-  ''
-).replace(/\/$/, '');
 
 export default function Login({ onLogin }) {
   const [view, setView] = useState('login'); // 'login' | 'forgot' | 'reset'
@@ -63,32 +57,32 @@ export default function Login({ onLogin }) {
     setError('');
 
     try {
-      const res = await fetch(`${BACKEND_BASE}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
+      const result = await loginAPI(email, password);
 
-      if (!res.ok) {
-        let errMsg = 'Login failed';
-        try {
-          const errData = await res.json();
-          errMsg = errData.error || errMsg;
-        } catch {
-          const txt = await res.text();
-          if (txt && txt.startsWith('<!')) errMsg = 'Server returned HTML (likely 404). Ensure backend is running.';
-          else errMsg = txt || errMsg;
+      if (result.token) {
+        if (onLogin) {
+          onLogin(result.token, result.user, result.mustChangePassword || false);
         }
-        throw new Error(errMsg);
-      }
-
-      const data = await res.json();
-
-      if (onLogin) {
-        onLogin(data.token, data.user, data.mustChangePassword || false);
+      } else {
+        setError(result.error || 'Invalid email or password');
       }
     } catch (err) {
-      setError(err.message || 'Server connection error');
+      console.error('[Login] Error:', err.message);
+
+      if (
+        err.message?.includes('ERR_CONNECTION_REFUSED') ||
+        err.message?.includes('Failed to fetch') ||
+        err.message?.includes('NetworkError') ||
+        err.message?.includes('fetch')
+      ) {
+        setError(
+          'Cannot connect to the server. ' +
+          'If this is on waveclosers.up.railway.app — contact Riyash: ' +
+          'the backend URL is not configured correctly in Railway.'
+        );
+      } else {
+        setError(err.message || 'Login failed — please try again');
+      }
     } finally {
       setLoading(false);
     }
@@ -106,7 +100,7 @@ export default function Login({ onLogin }) {
     setSuccessMsg('');
 
     try {
-      const res = await fetch(`${BACKEND_BASE}/api/auth/forgot-password`, {
+      const res = await fetch(`${BASE}/api/auth/forgot-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: forgotEmail }),
@@ -130,7 +124,17 @@ export default function Login({ onLogin }) {
       setNewPassword('');
       setConfirmPassword('');
     } catch (err) {
-      setError(err.message || 'Server connection error');
+      console.error('[Login] Forgot password error:', err.message);
+      if (
+        err.message?.includes('ERR_CONNECTION_REFUSED') ||
+        err.message?.includes('Failed to fetch') ||
+        err.message?.includes('NetworkError') ||
+        err.message?.includes('fetch')
+      ) {
+        setError('Cannot connect to the server. Please check connection and try again.');
+      } else {
+        setError(err.message || 'Server connection error');
+      }
     } finally {
       setLoading(false);
     }
@@ -144,7 +148,7 @@ export default function Login({ onLogin }) {
     setError('');
 
     try {
-      const res = await fetch(`${BACKEND_BASE}/api/auth/reset-password`, {
+      const res = await fetch(`${BASE}/api/auth/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -171,7 +175,17 @@ export default function Login({ onLogin }) {
       setEmail(forgotEmail);
       setPassword('');
     } catch (err) {
-      setError(err.message || 'Server connection error');
+      console.error('[Login] Reset password error:', err.message);
+      if (
+        err.message?.includes('ERR_CONNECTION_REFUSED') ||
+        err.message?.includes('Failed to fetch') ||
+        err.message?.includes('NetworkError') ||
+        err.message?.includes('fetch')
+      ) {
+        setError('Cannot connect to the server. Please check connection and try again.');
+      } else {
+        setError(err.message || 'Server connection error');
+      }
     } finally {
       setLoading(false);
     }
