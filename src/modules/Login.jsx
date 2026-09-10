@@ -16,6 +16,13 @@ function checkStrength(pw) {
   return                  { score: 4, tier: 'strong', label: 'Strong', color: '#10B981' };
 }
 
+const BACKEND_BASE = (
+  import.meta.env.VITE_BACKEND_URL ||
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.VITE_CLAUDE_PROXY_URL ? import.meta.env.VITE_CLAUDE_PROXY_URL.replace('/api/claude', '') : '') ||
+  ''
+).replace(/\/$/, '');
+
 export default function Login({ onLogin }) {
   const [view, setView] = useState('login'); // 'login' | 'forgot' | 'reset'
   const [email, setEmail] = useState('');
@@ -56,9 +63,7 @@ export default function Login({ onLogin }) {
     setError('');
 
     try {
-      const backendBase = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
-
-      const res = await fetch(`${backendBase}/api/auth/login`, {
+      const res = await fetch(`${BACKEND_BASE}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
@@ -101,8 +106,7 @@ export default function Login({ onLogin }) {
     setSuccessMsg('');
 
     try {
-      const backendBase = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
-      const res = await fetch(`${backendBase}/api/auth/forgot-password`, {
+      const res = await fetch(`${BACKEND_BASE}/api/auth/forgot-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: forgotEmail }),
@@ -140,8 +144,7 @@ export default function Login({ onLogin }) {
     setError('');
 
     try {
-      const backendBase = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
-      const res = await fetch(`${backendBase}/api/auth/reset-password`, {
+      const res = await fetch(`${BACKEND_BASE}/api/auth/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -16,6 +16,13 @@ function checkStrength(pw) {
   return                  { score: 4, tier: 'strong', label: 'Strong', color: 'var(--color-green)' };
 }
 
+const BACKEND_BASE = (
+  import.meta.env.VITE_BACKEND_URL ||
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.VITE_CLAUDE_PROXY_URL ? import.meta.env.VITE_CLAUDE_PROXY_URL.replace('/api/claude', '') : '') ||
+  ''
+).replace(/\/$/, '');
+
 export default function ChangePassword({ onChanged, onLogout }) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -45,10 +52,9 @@ export default function ChangePassword({ onChanged, onLogout }) {
     setError('');
 
     try {
-      const backendBase = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
       const token = localStorage.getItem('wc_session_token');
 
-      const res = await fetch(`${backendBase}/api/auth/change-password`, {
+      const res = await fetch(`${BACKEND_BASE}/api/auth/change-password`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',

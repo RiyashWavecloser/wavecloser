@@ -15,8 +15,14 @@
  *   checkServerHealth()         → { status, claude, airtable, email }
  */
 
-const PROXY = (import.meta.env.VITE_CLAUDE_PROXY_URL || '')
-  .replace('/api/claude', '');
+export const API_BASE = (
+  import.meta.env.VITE_BACKEND_URL ||
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.VITE_CLAUDE_PROXY_URL ? import.meta.env.VITE_CLAUDE_PROXY_URL.replace('/api/claude', '') : '') ||
+  ''
+).replace(/\/$/, '');
+
+const PROXY = API_BASE;
 
 
 let _token = localStorage.getItem('wc_session_token') || null;

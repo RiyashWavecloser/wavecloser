@@ -182,7 +182,12 @@ export default function BulkAssignModal({ onClose }) {
   const handleDedupCheck = async () => {
     setDedupChecking(true);
     try {
-      const BASE = import.meta.env.VITE_API_URL || '';
+      const BASE = (
+        import.meta.env.VITE_API_URL ||
+        import.meta.env.VITE_BACKEND_URL ||
+        (import.meta.env.VITE_CLAUDE_PROXY_URL ? import.meta.env.VITE_CLAUDE_PROXY_URL.replace('/api/claude', '') : '') ||
+        ''
+      ).replace(/\/$/, '');
       const token = localStorage.getItem('wc_session_token') || '';
       const resp = await fetch(`${BASE}/api/resume-leads/dedup-integrity-check`, {
         headers: { Authorization: `Bearer ${token}` },
